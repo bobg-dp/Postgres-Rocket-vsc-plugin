@@ -4,6 +4,7 @@
   "description": "VS Code extension for browsing and editing PostgreSQL data with transaction support.",
   "version": "0.0.1",
   "publisher": "local",
+  "repository": "git@github.com:bobg-dp/DeePee-Postgres-plugin.git",
   "engines": {
     "vscode": "^1.110.0"
   },
