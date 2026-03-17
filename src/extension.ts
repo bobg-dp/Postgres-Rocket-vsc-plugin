@@ -1219,11 +1219,28 @@ async function selectSavedConnection(
 export function activate(context: vscode.ExtensionContext): void {
   const service = new PostgresService();
   let activeConnectionId: string | undefined;
+
+  const refreshMenuContext = async (): Promise<void> => {
+    const hasConnections = getSavedConnections(context).length > 0;
+    await vscode.commands.executeCommand(
+      "setContext",
+      "postgresPlugin.hasConnections",
+      hasConnections,
+    );
+    await vscode.commands.executeCommand(
+      "setContext",
+      "postgresPlugin.connected",
+      Boolean(activeConnectionId),
+    );
+  };
+
   const provider = new PostgresTreeDataProvider(
     service,
     () => getSavedConnections(context),
     () => activeConnectionId,
   );
+
+  void refreshMenuContext();
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("postgresPlugin.explorer", provider),
@@ -1259,6 +1276,7 @@ export function activate(context: vscode.ExtensionContext): void {
             form.password,
           );
 
+          await refreshMenuContext();
           provider.refresh();
           vscode.window.showInformationMessage(
             `Connection saved: ${newConnection.name}`,
@@ -1331,6 +1349,7 @@ export function activate(context: vscode.ExtensionContext): void {
             form.password,
           );
 
+          await refreshMenuContext();
           provider.refresh();
           vscode.window.showInformationMessage(
             `Connection updated: ${form.name}`,
@@ -1376,6 +1395,7 @@ export function activate(context: vscode.ExtensionContext): void {
             activeConnectionId = undefined;
           }
 
+          await refreshMenuContext();
           provider.refresh();
           vscode.window.showInformationMessage(
             `Connection deleted: ${selected.name}`,
@@ -1414,6 +1434,7 @@ export function activate(context: vscode.ExtensionContext): void {
           try {
             await service.connect(config);
             activeConnectionId = selected.id;
+            await refreshMenuContext();
             provider.refresh();
             vscode.window.setStatusBarMessage(
               `PostgreSQL connected: ${selected.name}`,
@@ -1464,6 +1485,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         await service.disconnect();
         activeConnectionId = undefined;
+        await refreshMenuContext();
         provider.refresh();
         vscode.window.showInformationMessage("PostgreSQL disconnected.");
       } catch (error) {
@@ -1600,6 +1622,7 @@ export function activate(context: vscode.ExtensionContext): void {
       async () => {
         try {
           await service.commitTransaction();
+          await refreshMenuContext();
           provider.refresh();
           vscode.window.showInformationMessage(
             "Transakcja zatwierdzona (COMMIT).",
@@ -1619,6 +1642,7 @@ export function activate(context: vscode.ExtensionContext): void {
       async () => {
         try {
           await service.rollbackTransaction();
+          await refreshMenuContext();
           provider.refresh();
           vscode.window.showInformationMessage(
             "Transakcja wycofana (ROLLBACK).",
@@ -1635,6 +1659,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push({
     dispose: () => {
       activeConnectionId = undefined;
+      void refreshMenuContext();
       void service.disconnect();
     },
   });
