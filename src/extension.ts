@@ -536,6 +536,11 @@ function getEditableTableHtml(
     .search-row input:focus {
       border-color: var(--vscode-focusBorder);
     }
+    #limitInput {
+      min-width: 110px;
+      width: 110px;
+      flex: 0 0 auto;
+    }
     .meta {
       font-size: 12px;
       opacity: 0.9;
@@ -689,6 +694,8 @@ function getEditableTableHtml(
   </div>
   <div class="search-row">
     <input id="searchInput" type="text" placeholder="Search in all columns..." />
+    <input id="limitInput" type="number" min="1" max="1000" step="1" placeholder="Limit" />
+    <button id="applyLimitButton" type="button">Load rows</button>
     <button id="searchButton" type="button">Search</button>
     <button id="clearSearchButton" type="button">Clear</button>
   </div>
@@ -723,6 +730,8 @@ function getEditableTableHtml(
     const tableWrap = document.getElementById("tableWrap");
     const saveButton = document.getElementById("saveChanges");
     const searchInput = document.getElementById("searchInput");
+    const limitInput = document.getElementById("limitInput");
+    const applyLimitButton = document.getElementById("applyLimitButton");
     const searchButton = document.getElementById("searchButton");
     const clearSearchButton = document.getElementById("clearSearchButton");
 
@@ -945,6 +954,7 @@ function getEditableTableHtml(
     function render() {
       title.textContent = state.schema + "." + state.table;
       searchInput.value = state.searchQuery || "";
+      limitInput.value = String(Number(state.limit || 100));
 
       const shownRows = state.rows.length;
       const matchedRows = Number(state.matchedRows || 0);
@@ -1041,16 +1051,42 @@ function getEditableTableHtml(
       return changesByRow.size > 0;
     }
 
-    function requestSearch(nextQuery) {
+    function parseRequestedLimit() {
+      const parsed = Number(limitInput.value);
+      if (!Number.isFinite(parsed)) {
+        return null;
+      }
+
+      const normalized = Math.floor(parsed);
+      if (normalized < 1 || normalized > 1000) {
+        return null;
+      }
+
+      return normalized;
+    }
+
+    function requestSearch(nextQuery, nextLimit, loadingMessage) {
       if (hasUnsavedChanges()) {
         setStatus("Save or discard current changes before searching.", false);
         return;
       }
 
+      const requestedLimit = typeof nextLimit === "number"
+        ? nextLimit
+        : parseRequestedLimit();
+      if (!requestedLimit) {
+        setStatus("Limit must be a number between 1 and 1000.", false);
+        return;
+      }
+
+      applyLimitButton.disabled = true;
       searchButton.disabled = true;
       clearSearchButton.disabled = true;
-      setStatus("Loading filtered rows...", true);
-      vscode.postMessage({ type: "search", payload: { query: nextQuery } });
+      setStatus(loadingMessage || "Loading rows...", true);
+      vscode.postMessage({
+        type: "search",
+        payload: { query: nextQuery, limit: requestedLimit },
+      });
     }
 
     modalCancel.addEventListener("click", () => {
@@ -1103,7 +1139,7 @@ function getEditableTableHtml(
     });
 
     searchButton.addEventListener("click", () => {
-      requestSearch(searchInput.value);
+      requestSearch(searchInput.value, undefined, "Loading filtered rows...");
     });
 
     clearSearchButton.addEventListener("click", () => {
@@ -1112,13 +1148,29 @@ function getEditableTableHtml(
       }
 
       searchInput.value = "";
-      requestSearch("");
+      requestSearch("", undefined, "Loading rows...");
     });
 
     searchInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
-        requestSearch(searchInput.value);
+        requestSearch(searchInput.value, undefined, "Loading filtered rows...");
       }
+    });
+
+    applyLimitButton.addEventListener("click", () => {
+      const requestedLimit = parseRequestedLimit();
+      if (!requestedLimit) {
+        setStatus("Limit must be a number between 1 and 1000.", false);
+        return;
+      }
+
+      const currentLimit = Number(state.limit || 100);
+      const query = searchInput.value;
+      const message = requestedLimit > currentLimit
+        ? "Loading missing rows..."
+        : "Refreshing rows...";
+
+      requestSearch(query, requestedLimit, message);
     });
 
     window.addEventListener("message", (event) => {
@@ -1128,6 +1180,7 @@ function getEditableTableHtml(
       }
 
       if (msg.type === "refreshData") {
+        applyLimitButton.disabled = false;
         searchButton.disabled = false;
         clearSearchButton.disabled = false;
         state = {
@@ -1174,8 +1227,8 @@ async function openEditableTablePanel(
   tableData: EditableTableData,
   onSaved: () => void,
 ): Promise<void> {
-  const queryLimit = 100;
   let currentSearch = "";
+  let currentLimit = Math.max(1, Math.min(1000, Math.floor(tableData.limit || 100)));
 
   const panel = vscode.window.createWebviewPanel(
     "postgresPlugin.tableEditor",
@@ -1192,7 +1245,7 @@ async function openEditableTablePanel(
     table,
     {
       ...tableData,
-      limit: queryLimit,
+      limit: currentLimit,
     },
     currentSearch,
   );
@@ -1204,24 +1257,29 @@ async function openEditableTablePanel(
             type?: string;
             payload?:
               | Record<string, Record<string, unknown>>
-              | { query?: string };
+              | { query?: string; limit?: number };
           })
         : undefined;
 
     if (payload?.type === "search") {
       const queryPayload =
         payload.payload && typeof payload.payload === "object"
-          ? (payload.payload as { query?: unknown })
+          ? (payload.payload as { query?: unknown; limit?: unknown })
           : undefined;
 
       currentSearch =
         typeof queryPayload?.query === "string" ? queryPayload.query : "";
+      const requestedLimit =
+        typeof queryPayload?.limit === "number" && Number.isFinite(queryPayload.limit)
+          ? Math.floor(queryPayload.limit)
+          : currentLimit;
+      currentLimit = Math.max(1, Math.min(1000, requestedLimit));
 
       try {
         const nextData = await service.previewRowsForEditor(
           schema,
           table,
-          queryLimit,
+          currentLimit,
           currentSearch,
         );
 
@@ -1280,7 +1338,7 @@ async function openEditableTablePanel(
       const refreshedData = await service.previewRowsForEditor(
         schema,
         table,
-        queryLimit,
+        currentLimit,
         currentSearch,
       );
       await panel.webview.postMessage({

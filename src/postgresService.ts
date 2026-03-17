@@ -263,7 +263,7 @@ export class PostgresService {
     }
 
     const result = await this.execute(
-      `SELECT ctid::text AS __ctid__, * FROM ${safeSchema}.${safeTable} ${whereClause} LIMIT $${queryParams.length}`,
+      `SELECT ctid::text AS __ctid__, * FROM ${safeSchema}.${safeTable} ${whereClause} ORDER BY ctid LIMIT $${queryParams.length}`,
       queryParams,
     );
 
