@@ -50,15 +50,3 @@ DeePee is a VS Code extension for working with PostgreSQL using a UI-first workf
 4. The extension saves all row updates in a single transaction:
    - success -> `COMMIT`
    - error -> `ROLLBACK`
-
-## Development
-
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
-2. Build:
-   ```bash
-   npm run compile
-   ```
-3. Press `F5` in VS Code to launch the Extension Development Host.
