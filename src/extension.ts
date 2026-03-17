@@ -476,8 +476,9 @@ function getEditableTableHtml(
   schema: string,
   table: string,
   data: EditableTableData,
+  searchQuery = "",
 ): string {
-  const payload = JSON.stringify({ schema, table, ...data }).replace(
+  const payload = JSON.stringify({ schema, table, searchQuery, ...data }).replace(
     /</g,
     "\\u003c",
   );
@@ -513,6 +514,32 @@ function getEditableTableHtml(
     }
     .status {
       font-size: 12px;
+      min-height: 16px;
+    }
+    .search-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 8px 0;
+    }
+    .search-row input {
+      min-width: 280px;
+      flex: 1;
+      border: 1px solid var(--vscode-input-border);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 6px;
+      padding: 7px 10px;
+      outline: none;
+    }
+    .search-row input:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+    .meta {
+      font-size: 12px;
+      opacity: 0.9;
+      margin-bottom: 8px;
       min-height: 16px;
     }
     .status.ok {
@@ -660,6 +687,12 @@ function getEditableTableHtml(
     <div class="title" id="title"></div>
     <button id="saveChanges" type="button">Save Changes</button>
   </div>
+  <div class="search-row">
+    <input id="searchInput" type="text" placeholder="Search in all columns..." />
+    <button id="searchButton" type="button">Search</button>
+    <button id="clearSearchButton" type="button">Clear</button>
+  </div>
+  <div id="meta" class="meta"></div>
   <div id="status" class="status"></div>
   <div id="tableWrap" class="table-wrap"></div>
 
@@ -678,16 +711,20 @@ function getEditableTableHtml(
 
   <script>
     const vscode = acquireVsCodeApi();
-    const state = ${payload};
+    let state = ${payload};
     const changesByRow = new Map();
-    const rowsByCtid = new Map(state.rows.map((row) => [row.ctid, row]));
+    let rowsByCtid = new Map(state.rows.map((row) => [row.ctid, row]));
     const columnWidths = {};
     const MIN_COLUMN_WIDTH = 120;
 
     const title = document.getElementById("title");
+    const meta = document.getElementById("meta");
     const status = document.getElementById("status");
     const tableWrap = document.getElementById("tableWrap");
     const saveButton = document.getElementById("saveChanges");
+    const searchInput = document.getElementById("searchInput");
+    const searchButton = document.getElementById("searchButton");
+    const clearSearchButton = document.getElementById("clearSearchButton");
 
     const modal = document.getElementById("cellModal");
     const modalTitle = document.getElementById("cellModalTitle");
@@ -906,10 +943,24 @@ function getEditableTableHtml(
     }
 
     function render() {
-      title.textContent = state.schema + "." + state.table + " (" + state.rows.length + " rows)";
+      title.textContent = state.schema + "." + state.table;
+      searchInput.value = state.searchQuery || "";
+
+      const shownRows = state.rows.length;
+      const matchedRows = Number(state.matchedRows || 0);
+      const totalRows = Number(state.totalRows || 0);
+      const currentLimit = Number(state.limit || 100);
+      const isFiltered = (state.searchQuery || "").trim().length > 0;
+      const scopeLabel = isFiltered
+        ? "matching filter"
+        : "from table";
+
+      meta.textContent =
+        "Showing " + shownRows + " of " + matchedRows + " " + scopeLabel +
+        " (total in table: " + totalRows + ", limit: " + currentLimit + ")";
 
       if (!state.rows.length) {
-        tableWrap.innerHTML = '<div class="empty">Tabela nie zawiera danych.</div>';
+        tableWrap.innerHTML = '<div class="empty">No rows found for the current filter.</div>';
         saveButton.disabled = true;
         return;
       }
@@ -982,6 +1033,24 @@ function getEditableTableHtml(
       for (const column of state.columns) {
         setColumnWidth(column, columnWidths[column]);
       }
+
+      saveButton.disabled = false;
+    }
+
+    function hasUnsavedChanges() {
+      return changesByRow.size > 0;
+    }
+
+    function requestSearch(nextQuery) {
+      if (hasUnsavedChanges()) {
+        setStatus("Save or discard current changes before searching.", false);
+        return;
+      }
+
+      searchButton.disabled = true;
+      clearSearchButton.disabled = true;
+      setStatus("Loading filtered rows...", true);
+      vscode.postMessage({ type: "search", payload: { query: nextQuery } });
     }
 
     modalCancel.addEventListener("click", () => {
@@ -1033,9 +1102,47 @@ function getEditableTableHtml(
       vscode.postMessage({ type: "saveChanges", payload });
     });
 
+    searchButton.addEventListener("click", () => {
+      requestSearch(searchInput.value);
+    });
+
+    clearSearchButton.addEventListener("click", () => {
+      if (!searchInput.value.trim() && !(state.searchQuery || "").trim()) {
+        return;
+      }
+
+      searchInput.value = "";
+      requestSearch("");
+    });
+
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        requestSearch(searchInput.value);
+      }
+    });
+
     window.addEventListener("message", (event) => {
       const msg = event.data;
-      if (!msg || msg.type !== "saveResult") {
+      if (!msg) {
+        return;
+      }
+
+      if (msg.type === "refreshData") {
+        searchButton.disabled = false;
+        clearSearchButton.disabled = false;
+        state = {
+          ...state,
+          ...msg.payload,
+          searchQuery: msg.query || "",
+        };
+        rowsByCtid = new Map(state.rows.map((row) => [row.ctid, row]));
+        changesByRow.clear();
+        setStatus("Rows loaded.", true);
+        render();
+        return;
+      }
+
+      if (msg.type !== "saveResult") {
         return;
       }
 
@@ -1067,6 +1174,9 @@ async function openEditableTablePanel(
   tableData: EditableTableData,
   onSaved: () => void,
 ): Promise<void> {
+  const queryLimit = 100;
+  let currentSearch = "";
+
   const panel = vscode.window.createWebviewPanel(
     "postgresPlugin.tableEditor",
     `Table: ${schema}.${table}`,
@@ -1077,16 +1187,59 @@ async function openEditableTablePanel(
     },
   );
 
-  panel.webview.html = getEditableTableHtml(schema, table, tableData);
+  panel.webview.html = getEditableTableHtml(
+    schema,
+    table,
+    {
+      ...tableData,
+      limit: queryLimit,
+    },
+    currentSearch,
+  );
 
   panel.webview.onDidReceiveMessage(async (message: unknown) => {
     const payload =
       typeof message === "object" && message !== null
         ? (message as {
             type?: string;
-            payload?: Record<string, Record<string, unknown>>;
+            payload?:
+              | Record<string, Record<string, unknown>>
+              | { query?: string };
           })
         : undefined;
+
+    if (payload?.type === "search") {
+      const queryPayload =
+        payload.payload && typeof payload.payload === "object"
+          ? (payload.payload as { query?: unknown })
+          : undefined;
+
+      currentSearch =
+        typeof queryPayload?.query === "string" ? queryPayload.query : "";
+
+      try {
+        const nextData = await service.previewRowsForEditor(
+          schema,
+          table,
+          queryLimit,
+          currentSearch,
+        );
+
+        await panel.webview.postMessage({
+          type: "refreshData",
+          query: currentSearch,
+          payload: nextData,
+        });
+      } catch (error) {
+        await panel.webview.postMessage({
+          type: "saveResult",
+          ok: false,
+          message: `Search error: ${getErrorMessage(error)}`,
+        });
+      }
+
+      return;
+    }
 
     if (payload?.type !== "saveChanges") {
       return;
@@ -1123,6 +1276,18 @@ async function openEditableTablePanel(
 
       await service.commitTransaction();
       onSaved();
+
+      const refreshedData = await service.previewRowsForEditor(
+        schema,
+        table,
+        queryLimit,
+        currentSearch,
+      );
+      await panel.webview.postMessage({
+        type: "refreshData",
+        query: currentSearch,
+        payload: refreshedData,
+      });
 
       await panel.webview.postMessage({
         type: "saveResult",
@@ -1543,6 +1708,7 @@ export function activate(context: vscode.ExtensionContext): void {
             schema,
             table,
             100,
+            "",
           );
           await openEditableTablePanel(service, schema, table, tableData, () =>
             provider.refresh(),

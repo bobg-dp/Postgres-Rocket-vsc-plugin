@@ -30,6 +30,9 @@ export interface DbColumn {
 export interface EditableTableData {
   columns: string[];
   columnTypes: Record<string, string>;
+  totalRows: number;
+  matchedRows: number;
+  limit: number;
   rows: Array<{
     ctid: string;
     data: Record<string, unknown>;
@@ -216,24 +219,53 @@ export class PostgresService {
     schema: string,
     table: string,
     limit = 100,
+    search = "",
   ): Promise<EditableTableData> {
     const safeSchema = quoteIdentifier(schema);
     const safeTable = quoteIdentifier(table);
-
-    const result = await this.execute(
-      `SELECT ctid::text AS __ctid__, * FROM ${safeSchema}.${safeTable} LIMIT $1`,
-      [limit],
-    );
-
-    const columns = result.fields
-      .map((field) => field.name)
-      .filter((name) => name !== "__ctid__");
-
     const columnMetadata = await this.listColumns(schema, table);
+    const columns = columnMetadata.map((column) => column.name);
     const columnTypes: Record<string, string> = {};
     for (const column of columnMetadata) {
       columnTypes[column.name] = column.dataType.toLowerCase();
     }
+
+    const normalizedLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
+    const normalizedSearch = search.trim();
+    const hasSearch = normalizedSearch.length > 0;
+
+    const concatenatedColumns =
+      columns.length > 0
+        ? columns
+            .map(
+              (column) =>
+                `COALESCE(${quoteIdentifier(column)}::text, '')`,
+            )
+            .join(", ")
+        : "''";
+    const whereClause = hasSearch
+      ? `WHERE CONCAT_WS(' ', ${concatenatedColumns}) ILIKE $1`
+      : "";
+    const queryParams = hasSearch ? [`%${normalizedSearch}%`, normalizedLimit] : [normalizedLimit];
+
+    const totalResult = await this.execute(
+      `SELECT COUNT(*)::bigint AS total FROM ${safeSchema}.${safeTable}`,
+    );
+    const totalRows = Number(totalResult.rows[0]?.total ?? 0);
+
+    let matchedRows = totalRows;
+    if (hasSearch) {
+      const matchedResult = await this.execute(
+        `SELECT COUNT(*)::bigint AS total FROM ${safeSchema}.${safeTable} ${whereClause}`,
+        [`%${normalizedSearch}%`],
+      );
+      matchedRows = Number(matchedResult.rows[0]?.total ?? 0);
+    }
+
+    const result = await this.execute(
+      `SELECT ctid::text AS __ctid__, * FROM ${safeSchema}.${safeTable} ${whereClause} LIMIT $${queryParams.length}`,
+      queryParams,
+    );
 
     const rows = result.rows.map((row) => {
       const ctid = String(row.__ctid__);
@@ -246,7 +278,14 @@ export class PostgresService {
       return { ctid, data };
     });
 
-    return { columns, columnTypes, rows };
+    return {
+      columns,
+      columnTypes,
+      totalRows,
+      matchedRows,
+      limit: normalizedLimit,
+      rows,
+    };
   }
 
   public async updateRowByCtid(
