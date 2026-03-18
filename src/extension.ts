@@ -12,6 +12,7 @@ import {
 
 const CONNECTIONS_KEY = "postgresPlugin.connections";
 const PASSWORD_KEY_PREFIX = "postgresPlugin.password.";
+const SAVED_QUERIES_KEY_PREFIX = "postgresPlugin.savedQueries.";
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -46,6 +47,22 @@ interface ConnectionFormData {
   user: string;
   password: string;
   ssl: boolean;
+}
+
+interface SavedSqlQuery {
+  id: string;
+  name: string;
+  sql: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface QueryExecutionResultPayload {
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  rowCount: number;
+  command: string;
+  durationMs: number;
 }
 
 function escapeHtml(value: string): string {
@@ -470,6 +487,607 @@ async function toConnectionConfig(
     password,
     ssl: connection.ssl,
   };
+}
+
+function getSavedSqlQueries(
+  context: vscode.ExtensionContext,
+  connectionId: string,
+): SavedSqlQuery[] {
+  return context.globalState.get<SavedSqlQuery[]>(
+    `${SAVED_QUERIES_KEY_PREFIX}${connectionId}`,
+    [],
+  );
+}
+
+async function saveSqlQueries(
+  context: vscode.ExtensionContext,
+  connectionId: string,
+  queries: SavedSqlQuery[],
+): Promise<void> {
+  await context.globalState.update(
+    `${SAVED_QUERIES_KEY_PREFIX}${connectionId}`,
+    queries,
+  );
+}
+
+function toQueryResultPayload(
+  result: Awaited<ReturnType<PostgresService["execute"]>>,
+  durationMs: number,
+): QueryExecutionResultPayload {
+  const columnsFromFields = result.fields.map((field) => field.name);
+  const columns =
+    columnsFromFields.length > 0
+      ? columnsFromFields
+      : Object.keys(result.rows[0] ?? {});
+
+  return {
+    columns,
+    rows: result.rows as Array<Record<string, unknown>>,
+    rowCount: result.rowCount ?? 0,
+    command: result.command,
+    durationMs,
+  };
+}
+
+function getQueryPanelHtml(
+  connectionName: string,
+  initialSql: string,
+  savedQueries: SavedSqlQuery[],
+): string {
+  const payload = JSON.stringify({
+    connectionName,
+    initialSql,
+    savedQueries,
+  }).replace(/</g, "\\u003c");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SQL Query Panel</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: var(--vscode-font-family);
+      color: var(--vscode-foreground);
+      background: var(--vscode-editor-background);
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .status {
+      min-height: 18px;
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+    .status.ok {
+      color: var(--vscode-testing-iconPassed);
+    }
+    .status.error {
+      color: var(--vscode-testing-iconFailed);
+    }
+    .editor-wrap {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 180px;
+      resize: vertical;
+      box-sizing: border-box;
+      border: 1px solid var(--vscode-input-border);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 8px;
+      padding: 10px;
+      outline: none;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    textarea:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: 1px solid var(--vscode-button-border);
+      border-radius: 6px;
+      padding: 7px 12px;
+      cursor: pointer;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+    }
+    button.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+    .saved-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    select {
+      border: 1px solid var(--vscode-dropdown-border);
+      background: var(--vscode-dropdown-background);
+      color: var(--vscode-dropdown-foreground);
+      padding: 7px 10px;
+      border-radius: 6px;
+      outline: none;
+      min-height: 32px;
+    }
+    .results {
+      border: 1px solid var(--vscode-editorWidget-border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .results-header {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--vscode-editorWidget-border);
+      background: var(--vscode-sideBar-background);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .results-body {
+      max-height: 46vh;
+      overflow: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 640px;
+    }
+    th,
+    td {
+      border-bottom: 1px solid var(--vscode-editorWidget-border);
+      text-align: left;
+      vertical-align: top;
+      padding: 7px 9px;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--vscode-sideBar-background);
+      font-weight: 600;
+    }
+    .empty {
+      padding: 14px;
+      font-size: 12px;
+      opacity: 0.85;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div id="title" class="title"></div>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <div class="editor-wrap">
+    <textarea id="sqlInput" placeholder="Write SQL query here..."></textarea>
+    <div class="actions">
+      <button id="proceedButton" type="button"><span aria-hidden="true">&#9654;</span><span>Proceed</span></button>
+      <button id="saveButton" type="button" class="secondary"><span aria-hidden="true">&#128190;</span><span>Save</span></button>
+    </div>
+  </div>
+
+  <div class="saved-row">
+    <select id="savedQuerySelect"></select>
+    <button id="loadSavedButton" type="button" class="secondary">Load</button>
+    <button id="removeSavedButton" type="button" class="secondary">Delete</button>
+  </div>
+
+  <div class="results">
+    <div id="resultsHeader" class="results-header"></div>
+    <div id="resultsBody" class="results-body"></div>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    const initialState = ${payload};
+
+    const title = document.getElementById("title");
+    const status = document.getElementById("status");
+    const sqlInput = document.getElementById("sqlInput");
+    const proceedButton = document.getElementById("proceedButton");
+    const saveButton = document.getElementById("saveButton");
+    const savedQuerySelect = document.getElementById("savedQuerySelect");
+    const loadSavedButton = document.getElementById("loadSavedButton");
+    const removeSavedButton = document.getElementById("removeSavedButton");
+    const resultsHeader = document.getElementById("resultsHeader");
+    const resultsBody = document.getElementById("resultsBody");
+
+    let savedQueries = Array.isArray(initialState.savedQueries)
+      ? initialState.savedQueries
+      : [];
+
+    title.textContent = "SQL panel: " + String(initialState.connectionName || "connection");
+    sqlInput.value = String(initialState.initialSql || "");
+
+    function setStatus(message, ok) {
+      status.textContent = message;
+      status.className = ok ? "status ok" : "status error";
+    }
+
+    function updateSavedSelect() {
+      savedQuerySelect.innerHTML = "";
+      if (!savedQueries.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No saved queries";
+        savedQuerySelect.appendChild(option);
+        savedQuerySelect.disabled = true;
+        loadSavedButton.disabled = true;
+        removeSavedButton.disabled = true;
+        return;
+      }
+
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Select saved query";
+      savedQuerySelect.appendChild(placeholder);
+
+      for (const query of savedQueries) {
+        const option = document.createElement("option");
+        option.value = query.id;
+        option.textContent = query.name;
+        savedQuerySelect.appendChild(option);
+      }
+
+      savedQuerySelect.disabled = false;
+      loadSavedButton.disabled = false;
+      removeSavedButton.disabled = false;
+    }
+
+    function toCellValue(value) {
+      if (value === null || value === undefined) {
+        return "NULL";
+      }
+
+      if (typeof value === "object") {
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }
+
+      return String(value);
+    }
+
+    function renderResults(payload) {
+      if (!payload) {
+        resultsHeader.textContent = "Run query to see results.";
+        resultsBody.innerHTML = '<div class="empty">No results yet.</div>';
+        return;
+      }
+
+      const rowCount = Number(payload.rowCount || 0);
+      const command = String(payload.command || "SQL");
+      const duration = Number(payload.durationMs || 0);
+      resultsHeader.textContent =
+        command + " | rows: " + rowCount + " | time: " + duration + " ms";
+
+      const columns = Array.isArray(payload.columns) ? payload.columns : [];
+      const rows = Array.isArray(payload.rows) ? payload.rows : [];
+
+      if (!columns.length) {
+        resultsBody.innerHTML = '<div class="empty">Query executed. No tabular data returned.</div>';
+        return;
+      }
+
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+
+      for (const column of columns) {
+        const th = document.createElement("th");
+        th.textContent = String(column);
+        headRow.appendChild(th);
+      }
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      for (const row of rows) {
+        const tr = document.createElement("tr");
+        for (const column of columns) {
+          const td = document.createElement("td");
+          td.textContent = toCellValue(row[column]);
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+
+      table.appendChild(tbody);
+      resultsBody.innerHTML = "";
+      resultsBody.appendChild(table);
+    }
+
+    proceedButton.addEventListener("click", () => {
+      const sql = sqlInput.value;
+      vscode.postMessage({ type: "execute", payload: { sql } });
+    });
+
+    saveButton.addEventListener("click", () => {
+      const sql = sqlInput.value;
+      vscode.postMessage({ type: "saveQuery", payload: { sql } });
+    });
+
+    loadSavedButton.addEventListener("click", () => {
+      if (!savedQuerySelect.value) {
+        setStatus("Choose a saved query first.", false);
+        return;
+      }
+
+      vscode.postMessage({
+        type: "loadQuery",
+        payload: { id: savedQuerySelect.value },
+      });
+    });
+
+    removeSavedButton.addEventListener("click", () => {
+      if (!savedQuerySelect.value) {
+        setStatus("Choose a saved query first.", false);
+        return;
+      }
+
+      vscode.postMessage({
+        type: "deleteQuery",
+        payload: { id: savedQuerySelect.value },
+      });
+    });
+
+    window.addEventListener("message", (event) => {
+      const msg = event.data;
+      if (!msg || !msg.type) {
+        return;
+      }
+
+      if (msg.type === "status") {
+        setStatus(String(msg.message || ""), Boolean(msg.ok));
+        return;
+      }
+
+      if (msg.type === "savedQueriesUpdated") {
+        savedQueries = Array.isArray(msg.payload) ? msg.payload : [];
+        updateSavedSelect();
+        return;
+      }
+
+      if (msg.type === "queryLoaded") {
+        sqlInput.value = String((msg.payload && msg.payload.sql) || "");
+        sqlInput.focus();
+        return;
+      }
+
+      if (msg.type === "result") {
+        renderResults(msg.payload);
+      }
+    });
+
+    updateSavedSelect();
+    renderResults(undefined);
+  </script>
+</body>
+</html>`;
+}
+
+async function openQueryPanel(
+  context: vscode.ExtensionContext,
+  service: PostgresService,
+  connection: SavedConnection,
+): Promise<void> {
+  const panel = vscode.window.createWebviewPanel(
+    "postgresPlugin.queryPanel",
+    `SQL: ${connection.name}`,
+    vscode.ViewColumn.Active,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+    },
+  );
+
+  const readQueries = () => getSavedSqlQueries(context, connection.id);
+  panel.webview.html = getQueryPanelHtml(connection.name, "", readQueries());
+
+  panel.webview.onDidReceiveMessage(async (message: unknown) => {
+    const payload =
+      typeof message === "object" && message !== null
+        ? (message as {
+            type?: string;
+            payload?: { sql?: unknown; id?: unknown };
+          })
+        : undefined;
+
+    if (!payload?.type) {
+      return;
+    }
+
+    if (payload.type === "execute") {
+      const sql =
+        payload.payload && typeof payload.payload.sql === "string"
+          ? payload.payload.sql
+          : "";
+
+      if (!sql.trim()) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: "Query is empty.",
+        });
+        return;
+      }
+
+      try {
+        const startedAt = Date.now();
+        const result = await service.execute(sql);
+        const durationMs = Date.now() - startedAt;
+
+        await panel.webview.postMessage({
+          type: "result",
+          payload: toQueryResultPayload(result, durationMs),
+        });
+        await panel.webview.postMessage({
+          type: "status",
+          ok: true,
+          message: "Query executed successfully.",
+        });
+      } catch (error) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: getErrorMessage(error),
+        });
+      }
+
+      return;
+    }
+
+    if (payload.type === "saveQuery") {
+      const sql =
+        payload.payload && typeof payload.payload.sql === "string"
+          ? payload.payload.sql.trim()
+          : "";
+
+      if (!sql) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: "Cannot save empty query.",
+        });
+        return;
+      }
+
+      const defaultName = sql.split("\n")[0].slice(0, 60).trim() || "Saved query";
+      const name = await vscode.window.showInputBox({
+        title: `Save query (${connection.name})`,
+        prompt: "Saved query name",
+        value: defaultName,
+        ignoreFocusOut: true,
+      });
+
+      if (!name || !name.trim()) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: "Save canceled.",
+        });
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const newQuery: SavedSqlQuery = {
+        id: createConnectionId(),
+        name: name.trim(),
+        sql,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      const nextQueries = [newQuery, ...readQueries()].slice(0, 100);
+      await saveSqlQueries(context, connection.id, nextQueries);
+
+      await panel.webview.postMessage({
+        type: "savedQueriesUpdated",
+        payload: nextQueries,
+      });
+      await panel.webview.postMessage({
+        type: "status",
+        ok: true,
+        message: `Saved query: ${newQuery.name}`,
+      });
+      return;
+    }
+
+    if (payload.type === "loadQuery") {
+      const id =
+        payload.payload && typeof payload.payload.id === "string"
+          ? payload.payload.id
+          : "";
+      const query = readQueries().find((item) => item.id === id);
+
+      if (!query) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: "Saved query not found.",
+        });
+        return;
+      }
+
+      await panel.webview.postMessage({
+        type: "queryLoaded",
+        payload: { sql: query.sql },
+      });
+      await panel.webview.postMessage({
+        type: "status",
+        ok: true,
+        message: `Loaded query: ${query.name}`,
+      });
+      return;
+    }
+
+    if (payload.type === "deleteQuery") {
+      const id =
+        payload.payload && typeof payload.payload.id === "string"
+          ? payload.payload.id
+          : "";
+
+      const existing = readQueries();
+      const target = existing.find((item) => item.id === id);
+      if (!target) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: "Saved query not found.",
+        });
+        return;
+      }
+
+      const nextQueries = existing.filter((item) => item.id !== id);
+      await saveSqlQueries(context, connection.id, nextQueries);
+
+      await panel.webview.postMessage({
+        type: "savedQueriesUpdated",
+        payload: nextQueries,
+      });
+      await panel.webview.postMessage({
+        type: "status",
+        ok: true,
+        message: `Deleted query: ${target.name}`,
+      });
+    }
+  });
 }
 
 function getEditableTableHtml(
@@ -1463,6 +2081,25 @@ export function activate(context: vscode.ExtensionContext): void {
     () => activeConnectionId,
   );
 
+  const ensureConnectedTo = async (
+    connection: SavedConnection,
+  ): Promise<boolean> => {
+    if (service.isConnected() && activeConnectionId === connection.id) {
+      return true;
+    }
+
+    const config = await toConnectionConfig(context, connection);
+    if (!config) {
+      return false;
+    }
+
+    await service.connect(config);
+    activeConnectionId = connection.id;
+    await refreshMenuContext();
+    provider.refresh();
+    return true;
+  };
+
   void refreshMenuContext();
 
   context.subscriptions.push(
@@ -1781,39 +2418,62 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "postgresPlugin.openQueryPanel",
+      async (node?: ExplorerNode) => {
+        try {
+          let selected: SavedConnection | undefined;
+          if (node) {
+            selected = await selectSavedConnection(context, node);
+          } else {
+            selected = getSavedConnections(context).find(
+              (connection) => connection.id === activeConnectionId,
+            );
+
+            if (!selected) {
+              selected = await selectSavedConnection(context);
+            }
+          }
+
+          if (!selected) {
+            vscode.window.showWarningMessage(
+              "Brak zapisanych połączeń. Użyj Create Connection.",
+            );
+            return;
+          }
+
+          const connected = await ensureConnectedTo(selected);
+          if (!connected) {
+            return;
+          }
+
+          await openQueryPanel(context, service, selected);
+        } catch (error) {
+          vscode.window.showErrorMessage(
+            `PostgreSQL SQL error: ${getErrorMessage(error)}`,
+          );
+        }
+      },
+    ),
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand("postgresPlugin.executeSql", async () => {
       try {
         if (!service.isConnected()) {
-          vscode.window.showWarningMessage(
-            "Najpierw połącz się z bazą danych.",
+          await vscode.commands.executeCommand("postgresPlugin.openQueryPanel");
+        } else {
+          const currentConnection = getSavedConnections(context).find(
+            (connection) => connection.id === activeConnectionId,
           );
-          return;
+
+          if (!currentConnection) {
+            await vscode.commands.executeCommand("postgresPlugin.openQueryPanel");
+            return;
+          }
+
+          await openQueryPanel(context, service, currentConnection);
         }
-
-        const sql = await vscode.window.showInputBox({
-          title: "Execute SQL",
-          prompt: "Wpisz zapytanie SQL (SELECT/INSERT/UPDATE/DELETE/DDL)",
-          ignoreFocusOut: true,
-        });
-
-        if (!sql || !sql.trim()) {
-          return;
-        }
-
-        const result = await service.execute(sql);
-
-        if (result.rows.length > 0) {
-          await showRowsAsJson("SQL Result", result.rows);
-        }
-
-        const txSuffix = service.isTransactionActive()
-          ? " (w aktywnej transakcji)"
-          : "";
-        vscode.window.showInformationMessage(
-          `SQL executed. Rows: ${result.rowCount ?? 0}${txSuffix}`,
-        );
-
-        provider.refresh();
       } catch (error) {
         vscode.window.showErrorMessage(
           `PostgreSQL SQL error: ${getErrorMessage(error)}`,

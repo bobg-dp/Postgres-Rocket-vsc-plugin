@@ -17,6 +17,9 @@ https://buycoffee.to/driftingpixel
 - Connection test before save (`Test Connection`)
 - Edit and delete connections from the context menu
 - Schema -> table -> column explorer
+- SQL query panel opened from icon next to connection name
+- Query execution with `Proceed` and tabular results below the editor
+- Saved SQL queries per connection with quick load/delete
 - Editable table view for table rows
 - JSON-aware cell rendering and JSON validation in popup editor
 - Transactional row updates (`COMMIT` on success, `ROLLBACK` on error)
@@ -41,6 +44,14 @@ https://buycoffee.to/driftingpixel
 2. Rows are shown in an editable table.
 3. Resize columns by dragging the right edge of a column header.
 4. Click a cell value to open the popup editor.
+
+## SQL Query Panel
+
+1. In `Connections`, click the query icon next to a saved connection.
+2. Type SQL in the editor.
+3. Click `Proceed` to execute.
+4. Results are rendered directly under the query panel.
+5. Click `Save` to store the query for the current connection.
 
 ## Popup Cell Editor
 

@@ -66,6 +66,11 @@
         "icon": "$(terminal)"
       },
       {
+        "command": "postgresPlugin.openQueryPanel",
+        "title": "PostgreSQL: Open Query Panel",
+        "icon": "$(notebook-template)"
+      },
+      {
         "command": "postgresPlugin.beginTransaction",
         "title": "PostgreSQL: Begin Transaction",
         "icon": "$(play-circle)"
@@ -134,14 +139,19 @@
           "group": "inline@2"
         },
         {
-          "command": "postgresPlugin.deleteConnection",
+          "command": "postgresPlugin.openQueryPanel",
           "when": "view == postgresPlugin.explorer && viewItem == postgresConnection",
           "group": "inline@3"
         },
         {
+          "command": "postgresPlugin.deleteConnection",
+          "when": "view == postgresPlugin.explorer && viewItem == postgresConnection",
+          "group": "inline@4"
+        },
+        {
           "command": "postgresPlugin.previewTable",
           "when": "view == postgresPlugin.explorer && viewItem == postgresTable",
-          "group": "inline@4"
+          "group": "inline@5"
         }
       ],
       "commandPalette": [
@@ -179,6 +189,10 @@
         },
         {
           "command": "postgresPlugin.executeSql",
+          "when": "false"
+        },
+        {
+          "command": "postgresPlugin.openQueryPanel",
           "when": "false"
         },
         {
