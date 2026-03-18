@@ -6,7 +6,20 @@ import {
   PostgresService,
 } from "./postgresService";
 
-export type NodeType = "info" | "connection" | "schema" | "table" | "column";
+export type NodeType =
+  | "info"
+  | "connection"
+  | "savedQueriesFolder"
+  | "savedQuery"
+  | "schema"
+  | "table"
+  | "column";
+
+export interface SavedQueryTreeItem {
+  id: string;
+  name: string;
+  updatedAt?: string;
+}
 
 export interface SavedConnection {
   id: string;
@@ -24,6 +37,7 @@ export interface ExplorerNode {
   connectionId?: string;
   schema?: string;
   table?: string;
+  queryId?: string;
   description?: string;
 }
 
@@ -42,6 +56,17 @@ export class ExplorerItem extends vscode.TreeItem {
       this.command = {
         command: "postgresPlugin.connectSaved",
         title: "Connect Saved Connection",
+        arguments: [this.node],
+      };
+    } else if (node.type === "savedQueriesFolder") {
+      this.contextValue = "postgresSavedQueriesFolder";
+      this.iconPath = new vscode.ThemeIcon("folder-library");
+    } else if (node.type === "savedQuery") {
+      this.contextValue = "postgresSavedQuery";
+      this.iconPath = new vscode.ThemeIcon("symbol-string");
+      this.command = {
+        command: "postgresPlugin.openQueryPanel",
+        title: "Open Saved Query",
         arguments: [this.node],
       };
     } else if (node.type === "schema") {
@@ -75,6 +100,9 @@ export class PostgresTreeDataProvider implements vscode.TreeDataProvider<Explore
     private readonly service: PostgresService,
     private readonly getConnections: () => SavedConnection[],
     private readonly getActiveConnectionId: () => string | undefined,
+    private readonly getSavedQueries: (
+      connectionId: string,
+    ) => SavedQueryTreeItem[],
   ) {}
 
   public refresh(): void {
@@ -120,13 +148,28 @@ export class PostgresTreeDataProvider implements vscode.TreeDataProvider<Explore
     if (element.node.type === "connection") {
       const activeConnectionId = this.getActiveConnectionId();
       const currentConnectionId = element.node.connectionId;
+      if (!currentConnectionId) {
+        return [];
+      }
+
+      const savedQueries = this.getSavedQueries(currentConnectionId);
+      const children: ExplorerItem[] = [
+        new ExplorerItem(
+          {
+            type: "savedQueriesFolder",
+            label: "Saved Queries",
+            connectionId: currentConnectionId,
+            description: `${savedQueries.length}`,
+          },
+          vscode.TreeItemCollapsibleState.Collapsed,
+        ),
+      ];
 
       if (
         !this.service.isConnected() ||
-        !currentConnectionId ||
         currentConnectionId !== activeConnectionId
       ) {
-        return [
+        children.push(
           new ExplorerItem(
             {
               type: "info",
@@ -135,11 +178,13 @@ export class PostgresTreeDataProvider implements vscode.TreeDataProvider<Explore
             },
             vscode.TreeItemCollapsibleState.None,
           ),
-        ];
+        );
+
+        return children;
       }
 
       const schemas = await this.service.listSchemas();
-      return schemas.map(
+      const schemaItems = schemas.map(
         (schema: DbSchema) =>
           new ExplorerItem(
             {
@@ -151,6 +196,47 @@ export class PostgresTreeDataProvider implements vscode.TreeDataProvider<Explore
             vscode.TreeItemCollapsibleState.Collapsed,
           ),
       );
+
+      return [...children, ...schemaItems];
+    }
+
+    if (element.node.type === "savedQueriesFolder") {
+      const connectionId = element.node.connectionId;
+      if (!connectionId) {
+        return [];
+      }
+
+      const savedQueries = this.getSavedQueries(connectionId);
+      if (savedQueries.length === 0) {
+        return [
+          new ExplorerItem(
+            {
+              type: "info",
+              label: "Brak zapisanych zapytań",
+              description: "Zapisz zapytanie z panelu SQL",
+            },
+            vscode.TreeItemCollapsibleState.None,
+          ),
+        ];
+      }
+
+      return savedQueries.map(
+        (query) =>
+          new ExplorerItem(
+            {
+              type: "savedQuery",
+              label: query.name,
+              connectionId,
+              queryId: query.id,
+              description: query.updatedAt ? "saved" : undefined,
+            },
+            vscode.TreeItemCollapsibleState.None,
+          ),
+      );
+    }
+
+    if (element.node.type === "savedQuery") {
+      return [];
     }
 
     if (!this.service.isConnected()) {

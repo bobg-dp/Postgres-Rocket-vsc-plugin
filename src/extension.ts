@@ -3,6 +3,7 @@ import {
   ExplorerNode,
   PostgresTreeDataProvider,
   SavedConnection,
+  SavedQueryTreeItem,
 } from "./explorer";
 import {
   ConnectionConfig,
@@ -55,6 +56,10 @@ interface SavedSqlQuery {
   sql: string;
   createdAt: string;
   updatedAt: string;
+}
+
+interface OpenQueryPanelOptions {
+  initialQuery?: SavedSqlQuery;
 }
 
 interface QueryExecutionResultPayload {
@@ -510,6 +515,38 @@ async function saveSqlQueries(
   );
 }
 
+function getSavedQueriesForTree(
+  context: vscode.ExtensionContext,
+  connectionId: string,
+): SavedQueryTreeItem[] {
+  return getSavedSqlQueries(context, connectionId).map((query) => ({
+    id: query.id,
+    name: query.name,
+    updatedAt: query.updatedAt,
+  }));
+}
+
+function getSavedQueryFromNode(
+  context: vscode.ExtensionContext,
+  node?: ExplorerNode,
+): { connectionId: string; query: SavedSqlQuery } | undefined {
+  if (!node?.connectionId || !node?.queryId) {
+    return undefined;
+  }
+
+  const query = getSavedSqlQueries(context, node.connectionId).find(
+    (item) => item.id === node.queryId,
+  );
+  if (!query) {
+    return undefined;
+  }
+
+  return {
+    connectionId: node.connectionId,
+    query,
+  };
+}
+
 function toQueryResultPayload(
   result: Awaited<ReturnType<PostgresService["execute"]>>,
   durationMs: number,
@@ -532,12 +569,12 @@ function toQueryResultPayload(
 function getQueryPanelHtml(
   connectionName: string,
   initialSql: string,
-  savedQueries: SavedSqlQuery[],
+  initialQueryName?: string,
 ): string {
   const payload = JSON.stringify({
     connectionName,
     initialSql,
-    savedQueries,
+    initialQueryName,
   }).replace(/</g, "\\u003c");
 
   return `<!doctype html>
@@ -620,21 +657,11 @@ function getQueryPanelHtml(
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
     }
-    .saved-row {
-      display: grid;
-      grid-template-columns: 1fr auto auto;
-      gap: 8px;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-    select {
-      border: 1px solid var(--vscode-dropdown-border);
-      background: var(--vscode-dropdown-background);
-      color: var(--vscode-dropdown-foreground);
-      padding: 7px 10px;
-      border-radius: 6px;
-      outline: none;
-      min-height: 32px;
+    .query-info {
+      min-height: 18px;
+      margin: -4px 0 8px 0;
+      font-size: 12px;
+      opacity: 0.85;
     }
     .results {
       border: 1px solid var(--vscode-editorWidget-border);
@@ -691,6 +718,7 @@ function getQueryPanelHtml(
   </div>
 
   <div id="status" class="status"></div>
+  <div id="queryInfo" class="query-info"></div>
 
   <div class="editor-wrap">
     <textarea id="sqlInput" placeholder="Write SQL query here..."></textarea>
@@ -698,12 +726,6 @@ function getQueryPanelHtml(
       <button id="proceedButton" type="button"><span aria-hidden="true">&#9654;</span><span>Proceed</span></button>
       <button id="saveButton" type="button" class="secondary"><span aria-hidden="true">&#128190;</span><span>Save</span></button>
     </div>
-  </div>
-
-  <div class="saved-row">
-    <select id="savedQuerySelect"></select>
-    <button id="loadSavedButton" type="button" class="secondary">Load</button>
-    <button id="removeSavedButton" type="button" class="secondary">Delete</button>
   </div>
 
   <div class="results">
@@ -717,55 +739,22 @@ function getQueryPanelHtml(
 
     const title = document.getElementById("title");
     const status = document.getElementById("status");
+    const queryInfo = document.getElementById("queryInfo");
     const sqlInput = document.getElementById("sqlInput");
     const proceedButton = document.getElementById("proceedButton");
     const saveButton = document.getElementById("saveButton");
-    const savedQuerySelect = document.getElementById("savedQuerySelect");
-    const loadSavedButton = document.getElementById("loadSavedButton");
-    const removeSavedButton = document.getElementById("removeSavedButton");
     const resultsHeader = document.getElementById("resultsHeader");
     const resultsBody = document.getElementById("resultsBody");
 
-    let savedQueries = Array.isArray(initialState.savedQueries)
-      ? initialState.savedQueries
-      : [];
-
     title.textContent = "SQL panel: " + String(initialState.connectionName || "connection");
     sqlInput.value = String(initialState.initialSql || "");
+    queryInfo.textContent = initialState.initialQueryName
+      ? "Editing saved query: " + String(initialState.initialQueryName)
+      : "Editing ad-hoc query";
 
     function setStatus(message, ok) {
       status.textContent = message;
       status.className = ok ? "status ok" : "status error";
-    }
-
-    function updateSavedSelect() {
-      savedQuerySelect.innerHTML = "";
-      if (!savedQueries.length) {
-        const option = document.createElement("option");
-        option.value = "";
-        option.textContent = "No saved queries";
-        savedQuerySelect.appendChild(option);
-        savedQuerySelect.disabled = true;
-        loadSavedButton.disabled = true;
-        removeSavedButton.disabled = true;
-        return;
-      }
-
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = "Select saved query";
-      savedQuerySelect.appendChild(placeholder);
-
-      for (const query of savedQueries) {
-        const option = document.createElement("option");
-        option.value = query.id;
-        option.textContent = query.name;
-        savedQuerySelect.appendChild(option);
-      }
-
-      savedQuerySelect.disabled = false;
-      loadSavedButton.disabled = false;
-      removeSavedButton.disabled = false;
     }
 
     function toCellValue(value) {
@@ -843,30 +832,6 @@ function getQueryPanelHtml(
       vscode.postMessage({ type: "saveQuery", payload: { sql } });
     });
 
-    loadSavedButton.addEventListener("click", () => {
-      if (!savedQuerySelect.value) {
-        setStatus("Choose a saved query first.", false);
-        return;
-      }
-
-      vscode.postMessage({
-        type: "loadQuery",
-        payload: { id: savedQuerySelect.value },
-      });
-    });
-
-    removeSavedButton.addEventListener("click", () => {
-      if (!savedQuerySelect.value) {
-        setStatus("Choose a saved query first.", false);
-        return;
-      }
-
-      vscode.postMessage({
-        type: "deleteQuery",
-        payload: { id: savedQuerySelect.value },
-      });
-    });
-
     window.addEventListener("message", (event) => {
       const msg = event.data;
       if (!msg || !msg.type) {
@@ -878,24 +843,11 @@ function getQueryPanelHtml(
         return;
       }
 
-      if (msg.type === "savedQueriesUpdated") {
-        savedQueries = Array.isArray(msg.payload) ? msg.payload : [];
-        updateSavedSelect();
-        return;
-      }
-
-      if (msg.type === "queryLoaded") {
-        sqlInput.value = String((msg.payload && msg.payload.sql) || "");
-        sqlInput.focus();
-        return;
-      }
-
       if (msg.type === "result") {
         renderResults(msg.payload);
       }
     });
 
-    updateSavedSelect();
     renderResults(undefined);
   </script>
 </body>
@@ -906,10 +858,15 @@ async function openQueryPanel(
   context: vscode.ExtensionContext,
   service: PostgresService,
   connection: SavedConnection,
+  onQueriesChanged: () => void,
+  options: OpenQueryPanelOptions = {},
 ): Promise<void> {
+  let currentQuery = options.initialQuery;
   const panel = vscode.window.createWebviewPanel(
     "postgresPlugin.queryPanel",
-    `SQL: ${connection.name}`,
+    currentQuery
+      ? `SQL: ${connection.name} / ${currentQuery.name}`
+      : `SQL: ${connection.name}`,
     vscode.ViewColumn.Active,
     {
       enableScripts: true,
@@ -918,7 +875,11 @@ async function openQueryPanel(
   );
 
   const readQueries = () => getSavedSqlQueries(context, connection.id);
-  panel.webview.html = getQueryPanelHtml(connection.name, "", readQueries());
+  panel.webview.html = getQueryPanelHtml(
+    connection.name,
+    currentQuery?.sql ?? "",
+    currentQuery?.name,
+  );
 
   panel.webview.onDidReceiveMessage(async (message: unknown) => {
     const payload =
@@ -988,7 +949,10 @@ async function openQueryPanel(
         return;
       }
 
-      const defaultName = sql.split("\n")[0].slice(0, 60).trim() || "Saved query";
+      const defaultName =
+        currentQuery?.name ||
+        sql.split("\n")[0].slice(0, 60).trim() ||
+        "Saved query";
       const name = await vscode.window.showInputBox({
         title: `Save query (${connection.name})`,
         prompt: "Saved query name",
@@ -1006,86 +970,64 @@ async function openQueryPanel(
       }
 
       const nowIso = new Date().toISOString();
-      const newQuery: SavedSqlQuery = {
-        id: createConnectionId(),
-        name: name.trim(),
-        sql,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      };
-
-      const nextQueries = [newQuery, ...readQueries()].slice(0, 100);
-      await saveSqlQueries(context, connection.id, nextQueries);
-
-      await panel.webview.postMessage({
-        type: "savedQueriesUpdated",
-        payload: nextQueries,
-      });
-      await panel.webview.postMessage({
-        type: "status",
-        ok: true,
-        message: `Saved query: ${newQuery.name}`,
-      });
-      return;
-    }
-
-    if (payload.type === "loadQuery") {
-      const id =
-        payload.payload && typeof payload.payload.id === "string"
-          ? payload.payload.id
-          : "";
-      const query = readQueries().find((item) => item.id === id);
-
-      if (!query) {
-        await panel.webview.postMessage({
-          type: "status",
-          ok: false,
-          message: "Saved query not found.",
-        });
-        return;
-      }
-
-      await panel.webview.postMessage({
-        type: "queryLoaded",
-        payload: { sql: query.sql },
-      });
-      await panel.webview.postMessage({
-        type: "status",
-        ok: true,
-        message: `Loaded query: ${query.name}`,
-      });
-      return;
-    }
-
-    if (payload.type === "deleteQuery") {
-      const id =
-        payload.payload && typeof payload.payload.id === "string"
-          ? payload.payload.id
-          : "";
-
       const existing = readQueries();
-      const target = existing.find((item) => item.id === id);
-      if (!target) {
-        await panel.webview.postMessage({
-          type: "status",
-          ok: false,
-          message: "Saved query not found.",
-        });
-        return;
+      let nextQueries: SavedSqlQuery[];
+      let savedQueryName = name.trim();
+
+      if (currentQuery) {
+        let foundCurrent = false;
+        nextQueries = existing.map((item) =>
+          item.id === currentQuery!.id
+            ? ((foundCurrent = true),
+              {
+                ...item,
+                name: savedQueryName,
+                sql,
+                updatedAt: nowIso,
+              })
+            : item,
+        );
+
+        if (foundCurrent) {
+          currentQuery = nextQueries.find(
+            (item) => item.id === currentQuery!.id,
+          );
+        } else {
+          const recreatedQuery: SavedSqlQuery = {
+            id: createConnectionId(),
+            name: savedQueryName,
+            sql,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          };
+          nextQueries = [recreatedQuery, ...nextQueries].slice(0, 100);
+          currentQuery = recreatedQuery;
+        }
+      } else {
+        const newQuery: SavedSqlQuery = {
+          id: createConnectionId(),
+          name: savedQueryName,
+          sql,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        nextQueries = [newQuery, ...existing].slice(0, 100);
+        currentQuery = newQuery;
       }
 
-      const nextQueries = existing.filter((item) => item.id !== id);
       await saveSqlQueries(context, connection.id, nextQueries);
+      onQueriesChanged();
 
-      await panel.webview.postMessage({
-        type: "savedQueriesUpdated",
-        payload: nextQueries,
-      });
+      panel.title = currentQuery
+        ? `SQL: ${connection.name} / ${currentQuery.name}`
+        : `SQL: ${connection.name}`;
+
       await panel.webview.postMessage({
         type: "status",
         ok: true,
-        message: `Deleted query: ${target.name}`,
+        message: `Saved query: ${savedQueryName}`,
       });
+      return;
     }
   });
 }
@@ -2079,6 +2021,7 @@ export function activate(context: vscode.ExtensionContext): void {
     service,
     () => getSavedConnections(context),
     () => activeConnectionId,
+    (connectionId) => getSavedQueriesForTree(context, connectionId),
   );
 
   const ensureConnectedTo = async (
@@ -2249,6 +2192,10 @@ export function activate(context: vscode.ExtensionContext): void {
           );
           await saveConnections(context, connections);
           await context.secrets.delete(`${PASSWORD_KEY_PREFIX}${selected.id}`);
+          await context.globalState.update(
+            `${SAVED_QUERIES_KEY_PREFIX}${selected.id}`,
+            undefined,
+          );
 
           if (activeConnectionId === selected.id) {
             await service.disconnect();
@@ -2422,6 +2369,36 @@ export function activate(context: vscode.ExtensionContext): void {
       "postgresPlugin.openQueryPanel",
       async (node?: ExplorerNode) => {
         try {
+          const selectedQuery = getSavedQueryFromNode(context, node);
+          if (selectedQuery) {
+            const connection = getSavedConnections(context).find(
+              (item) => item.id === selectedQuery.connectionId,
+            );
+
+            if (!connection) {
+              vscode.window.showErrorMessage(
+                "Nie znaleziono połączenia dla zapisanego zapytania.",
+              );
+              return;
+            }
+
+            const connected = await ensureConnectedTo(connection);
+            if (!connected) {
+              return;
+            }
+
+            await openQueryPanel(
+              context,
+              service,
+              connection,
+              () => provider.refresh(),
+              {
+                initialQuery: selectedQuery.query,
+              },
+            );
+            return;
+          }
+
           let selected: SavedConnection | undefined;
           if (node) {
             selected = await selectSavedConnection(context, node);
@@ -2447,10 +2424,102 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
           }
 
-          await openQueryPanel(context, service, selected);
+          await openQueryPanel(context, service, selected, () =>
+            provider.refresh(),
+          );
         } catch (error) {
           vscode.window.showErrorMessage(
             `PostgreSQL SQL error: ${getErrorMessage(error)}`,
+          );
+        }
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "postgresPlugin.renameSavedQuery",
+      async (node?: ExplorerNode) => {
+        try {
+          const selected = getSavedQueryFromNode(context, node);
+          if (!selected) {
+            vscode.window.showWarningMessage(
+              "Wybierz zapisane zapytanie do zmiany nazwy.",
+            );
+            return;
+          }
+
+          const nextName = await vscode.window.showInputBox({
+            title: "Rename saved query",
+            prompt: "New query name",
+            value: selected.query.name,
+            ignoreFocusOut: true,
+          });
+
+          if (!nextName || !nextName.trim()) {
+            return;
+          }
+
+          const nowIso = new Date().toISOString();
+          const queries = getSavedSqlQueries(
+            context,
+            selected.connectionId,
+          ).map((item) =>
+            item.id === selected.query.id
+              ? { ...item, name: nextName.trim(), updatedAt: nowIso }
+              : item,
+          );
+
+          await saveSqlQueries(context, selected.connectionId, queries);
+          provider.refresh();
+          vscode.window.showInformationMessage(
+            `Query renamed: ${nextName.trim()}`,
+          );
+        } catch (error) {
+          vscode.window.showErrorMessage(
+            `Rename query error: ${getErrorMessage(error)}`,
+          );
+        }
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "postgresPlugin.deleteSavedQuery",
+      async (node?: ExplorerNode) => {
+        try {
+          const selected = getSavedQueryFromNode(context, node);
+          if (!selected) {
+            vscode.window.showWarningMessage(
+              "Wybierz zapisane zapytanie do usunięcia.",
+            );
+            return;
+          }
+
+          const confirmation = await vscode.window.showWarningMessage(
+            `Usunąć zapytanie ${selected.query.name}?`,
+            { modal: true },
+            "Delete",
+          );
+
+          if (confirmation !== "Delete") {
+            return;
+          }
+
+          const queries = getSavedSqlQueries(
+            context,
+            selected.connectionId,
+          ).filter((item) => item.id !== selected.query.id);
+
+          await saveSqlQueries(context, selected.connectionId, queries);
+          provider.refresh();
+          vscode.window.showInformationMessage(
+            `Deleted query: ${selected.query.name}`,
+          );
+        } catch (error) {
+          vscode.window.showErrorMessage(
+            `Delete query error: ${getErrorMessage(error)}`,
           );
         }
       },
@@ -2472,7 +2541,9 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
           }
 
-          await openQueryPanel(context, service, currentConnection);
+          await openQueryPanel(context, service, currentConnection, () =>
+            provider.refresh(),
+          );
         }
       } catch (error) {
         vscode.window.showErrorMessage(

@@ -19,7 +19,8 @@ https://buycoffee.to/driftingpixel
 - Schema -> table -> column explorer
 - SQL query panel opened from icon next to connection name
 - Query execution with `Proceed` and tabular results below the editor
-- Saved SQL queries per connection with quick load/delete
+- Saved SQL queries per connection in tree (`Saved Queries` folder)
+- Rename/delete saved queries from tree item actions
 - Editable table view for table rows
 - JSON-aware cell rendering and JSON validation in popup editor
 - Transactional row updates (`COMMIT` on success, `ROLLBACK` on error)
@@ -51,7 +52,14 @@ https://buycoffee.to/driftingpixel
 2. Type SQL in the editor.
 3. Click `Proceed` to execute.
 4. Results are rendered directly under the query panel.
-5. Click `Save` to store the query for the current connection.
+5. Click `Save` to store or update a query for the current connection.
+
+## Saved Queries In Tree
+
+1. Expand a connection.
+2. Open `Saved Queries` (first folder in that connection).
+3. Click a saved query to open it in the SQL panel.
+4. Use inline actions to rename or delete the saved query.
 
 ## Popup Cell Editor
 

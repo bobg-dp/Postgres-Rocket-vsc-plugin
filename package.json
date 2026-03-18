@@ -71,6 +71,16 @@
         "icon": "$(notebook-template)"
       },
       {
+        "command": "postgresPlugin.renameSavedQuery",
+        "title": "PostgreSQL: Rename Saved Query",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "postgresPlugin.deleteSavedQuery",
+        "title": "PostgreSQL: Delete Saved Query",
+        "icon": "$(trash)"
+      },
+      {
         "command": "postgresPlugin.beginTransaction",
         "title": "PostgreSQL: Begin Transaction",
         "icon": "$(play-circle)"
@@ -152,6 +162,26 @@
           "command": "postgresPlugin.previewTable",
           "when": "view == postgresPlugin.explorer && viewItem == postgresTable",
           "group": "inline@5"
+        },
+        {
+          "command": "postgresPlugin.openQueryPanel",
+          "when": "view == postgresPlugin.explorer && viewItem == postgresSavedQueriesFolder",
+          "group": "inline@1"
+        },
+        {
+          "command": "postgresPlugin.openQueryPanel",
+          "when": "view == postgresPlugin.explorer && viewItem == postgresSavedQuery",
+          "group": "inline@1"
+        },
+        {
+          "command": "postgresPlugin.renameSavedQuery",
+          "when": "view == postgresPlugin.explorer && viewItem == postgresSavedQuery",
+          "group": "inline@2"
+        },
+        {
+          "command": "postgresPlugin.deleteSavedQuery",
+          "when": "view == postgresPlugin.explorer && viewItem == postgresSavedQuery",
+          "group": "inline@3"
         }
       ],
       "commandPalette": [
@@ -193,6 +223,14 @@
         },
         {
           "command": "postgresPlugin.openQueryPanel",
+          "when": "false"
+        },
+        {
+          "command": "postgresPlugin.renameSavedQuery",
+          "when": "false"
+        },
+        {
+          "command": "postgresPlugin.deleteSavedQuery",
           "when": "false"
         },
         {
