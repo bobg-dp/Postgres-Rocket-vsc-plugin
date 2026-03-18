@@ -9,6 +9,7 @@ import {
   ConnectionConfig,
   EditableTableData,
   PostgresService,
+  SqlAutocompleteColumn,
 } from "./postgresService";
 
 const CONNECTIONS_KEY = "postgresPlugin.connections";
@@ -68,6 +69,18 @@ interface QueryExecutionResultPayload {
   rowCount: number;
   command: string;
   durationMs: number;
+}
+
+interface SqlAutocompleteSuggestion {
+  label: string;
+  insertText: string;
+  kind: "table" | "column" | "keyword";
+  detail?: string;
+}
+
+interface AutocompleteRequestPayload {
+  prefix: string;
+  tableQualifier?: string;
 }
 
 function escapeHtml(value: string): string {
@@ -566,6 +579,126 @@ function toQueryResultPayload(
   };
 }
 
+function normalizeIdentifier(value: string): string {
+  return value.replace(/"/g, "").toLowerCase();
+}
+
+function buildAutocompleteSuggestions(
+  metadata: SqlAutocompleteColumn[],
+  request: AutocompleteRequestPayload,
+): SqlAutocompleteSuggestion[] {
+  const prefix = (request.prefix ?? "").toLowerCase();
+  const qualifier = request.tableQualifier
+    ? normalizeIdentifier(request.tableQualifier)
+    : "";
+  const suggestions: SqlAutocompleteSuggestion[] = [];
+  const seen = new Set<string>();
+
+  if (qualifier) {
+    for (const item of metadata) {
+      const table = item.table.toLowerCase();
+      const schemaTable = `${item.schema}.${item.table}`.toLowerCase();
+      if (table !== qualifier && schemaTable !== qualifier) {
+        continue;
+      }
+
+      const columnLower = item.column.toLowerCase();
+      if (prefix && !columnLower.startsWith(prefix)) {
+        continue;
+      }
+
+      const key = `column:${item.column.toLowerCase()}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      suggestions.push({
+        label: item.column,
+        insertText: item.column,
+        kind: "column",
+        detail: `${item.schema}.${item.table}`,
+      });
+    }
+
+    return suggestions.slice(0, 30);
+  }
+
+  for (const item of metadata) {
+    const schemaTable = `${item.schema}.${item.table}`;
+    const tableLower = item.table.toLowerCase();
+    const schemaTableLower = schemaTable.toLowerCase();
+    const matchTable =
+      !prefix || tableLower.startsWith(prefix) || schemaTableLower.startsWith(prefix);
+
+    if (matchTable) {
+      const key = `table:${schemaTableLower}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        suggestions.push({
+          label: schemaTable,
+          insertText: schemaTable,
+          kind: "table",
+          detail: "table",
+        });
+      }
+    }
+  }
+
+  for (const item of metadata) {
+    const columnLower = item.column.toLowerCase();
+    if (prefix && !columnLower.startsWith(prefix)) {
+      continue;
+    }
+
+    const key = `column:${columnLower}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    suggestions.push({
+      label: item.column,
+      insertText: item.column,
+      kind: "column",
+      detail: `${item.schema}.${item.table}`,
+    });
+  }
+
+  const sqlKeywords = [
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "JOIN",
+    "ORDER BY",
+    "GROUP BY",
+    "LIMIT",
+    "RETURNING",
+  ];
+  for (const keyword of sqlKeywords) {
+    const lower = keyword.toLowerCase();
+    if (prefix && !lower.startsWith(prefix)) {
+      continue;
+    }
+
+    const key = `keyword:${lower}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    suggestions.push({
+      label: keyword,
+      insertText: keyword,
+      kind: "keyword",
+      detail: "keyword",
+    });
+  }
+
+  return suggestions.slice(0, 40);
+}
+
 function getQueryPanelHtml(
   connectionName: string,
   initialSql: string,
@@ -635,6 +768,50 @@ function getQueryPanelHtml(
     }
     textarea:focus {
       border-color: var(--vscode-focusBorder);
+    }
+    .autocomplete {
+      border: 1px solid var(--vscode-editorWidget-border);
+      background: var(--vscode-editorWidget-background);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .autocomplete.hidden {
+      display: none;
+    }
+    .autocomplete-header {
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--vscode-editorWidget-border);
+      font-size: 11px;
+      opacity: 0.85;
+    }
+    .autocomplete-list {
+      max-height: 180px;
+      overflow: auto;
+    }
+    .autocomplete-item {
+      width: 100%;
+      border: none;
+      border-bottom: 1px solid var(--vscode-editorWidget-border);
+      background: transparent;
+      color: var(--vscode-foreground);
+      padding: 7px 9px;
+      cursor: pointer;
+      text-align: left;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .autocomplete-item:last-child {
+      border-bottom: none;
+    }
+    .autocomplete-item.active {
+      background: var(--vscode-list-activeSelectionBackground);
+      color: var(--vscode-list-activeSelectionForeground);
+    }
+    .autocomplete-item .detail {
+      font-size: 11px;
+      opacity: 0.8;
     }
     .actions {
       display: flex;
@@ -722,6 +899,10 @@ function getQueryPanelHtml(
 
   <div class="editor-wrap">
     <textarea id="sqlInput" placeholder="Write SQL query here..."></textarea>
+    <div id="autocomplete" class="autocomplete hidden">
+      <div class="autocomplete-header">Suggestions (Ctrl+Space)</div>
+      <div id="autocompleteList" class="autocomplete-list"></div>
+    </div>
     <div class="actions">
       <button id="proceedButton" type="button"><span aria-hidden="true">&#9654;</span><span>Proceed</span></button>
       <button id="saveButton" type="button" class="secondary"><span aria-hidden="true">&#128190;</span><span>Save</span></button>
@@ -741,10 +922,19 @@ function getQueryPanelHtml(
     const status = document.getElementById("status");
     const queryInfo = document.getElementById("queryInfo");
     const sqlInput = document.getElementById("sqlInput");
+    const autocomplete = document.getElementById("autocomplete");
+    const autocompleteList = document.getElementById("autocompleteList");
     const proceedButton = document.getElementById("proceedButton");
     const saveButton = document.getElementById("saveButton");
     const resultsHeader = document.getElementById("resultsHeader");
     const resultsBody = document.getElementById("resultsBody");
+
+    let activeSuggestions = [];
+    let activeSuggestionIndex = -1;
+    let lastAutocompleteContext = {
+      replaceStart: 0,
+      replaceEnd: 0,
+    };
 
     title.textContent = "SQL panel: " + String(initialState.connectionName || "connection");
     sqlInput.value = String(initialState.initialSql || "");
@@ -755,6 +945,111 @@ function getQueryPanelHtml(
     function setStatus(message, ok) {
       status.textContent = message;
       status.className = ok ? "status ok" : "status error";
+    }
+
+    function hideAutocomplete() {
+      activeSuggestions = [];
+      activeSuggestionIndex = -1;
+      autocomplete.classList.add("hidden");
+      autocompleteList.innerHTML = "";
+    }
+
+    function showAutocomplete() {
+      autocomplete.classList.remove("hidden");
+    }
+
+    function getAutocompleteContext() {
+      const sql = String(sqlInput.value || "");
+      const cursor = Number(sqlInput.selectionStart || 0);
+      const left = sql.slice(0, cursor);
+      const match = left.match(/([A-Za-z_][A-Za-z0-9_\.]*)$/);
+      const token = match ? match[1] : "";
+      const tokenStart = match ? cursor - token.length : cursor;
+      const dotIndex = token.lastIndexOf(".");
+      const tableQualifier = dotIndex >= 0 ? token.slice(0, dotIndex) : "";
+      const prefix = dotIndex >= 0 ? token.slice(dotIndex + 1) : token;
+
+      return {
+        prefix,
+        tableQualifier,
+        replaceStart: dotIndex >= 0 ? tokenStart + dotIndex + 1 : tokenStart,
+        replaceEnd: cursor,
+      };
+    }
+
+    function applySuggestion(index) {
+      const suggestion = activeSuggestions[index];
+      if (!suggestion) {
+        return;
+      }
+
+      const sql = String(sqlInput.value || "");
+      const before = sql.slice(0, lastAutocompleteContext.replaceStart);
+      const after = sql.slice(lastAutocompleteContext.replaceEnd);
+      const inserted = suggestion.insertText;
+      const nextValue = before + inserted + after;
+      sqlInput.value = nextValue;
+
+      const nextCursor = before.length + inserted.length;
+      sqlInput.focus();
+      sqlInput.setSelectionRange(nextCursor, nextCursor);
+      hideAutocomplete();
+    }
+
+    function renderAutocomplete() {
+      autocompleteList.innerHTML = "";
+      if (!activeSuggestions.length) {
+        hideAutocomplete();
+        return;
+      }
+
+      activeSuggestions.forEach((suggestion, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "autocomplete-item" +
+          (index === activeSuggestionIndex ? " active" : "");
+
+        const label = document.createElement("span");
+        label.textContent = suggestion.label;
+
+        const detail = document.createElement("span");
+        detail.className = "detail";
+        detail.textContent = suggestion.kind +
+          (suggestion.detail ? " | " + suggestion.detail : "");
+
+        button.appendChild(label);
+        button.appendChild(detail);
+        button.addEventListener("click", () => {
+          applySuggestion(index);
+        });
+
+        autocompleteList.appendChild(button);
+      });
+
+      showAutocomplete();
+    }
+
+    function requestAutocomplete(force = false) {
+      const ctx = getAutocompleteContext();
+      const hasDot = Boolean(ctx.tableQualifier);
+      const hasPrefix = ctx.prefix.length > 0;
+      if (!force && !hasPrefix && !hasDot) {
+        hideAutocomplete();
+        return;
+      }
+
+      lastAutocompleteContext = {
+        replaceStart: ctx.replaceStart,
+        replaceEnd: ctx.replaceEnd,
+      };
+
+      vscode.postMessage({
+        type: "autocomplete",
+        payload: {
+          prefix: ctx.prefix,
+          tableQualifier: ctx.tableQualifier || undefined,
+        },
+      });
     }
 
     function toCellValue(value) {
@@ -827,6 +1122,49 @@ function getQueryPanelHtml(
       vscode.postMessage({ type: "execute", payload: { sql } });
     });
 
+    sqlInput.addEventListener("input", () => {
+      requestAutocomplete(false);
+    });
+
+    sqlInput.addEventListener("keydown", (event) => {
+      if (event.key === " " && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        requestAutocomplete(true);
+        return;
+      }
+
+      if (autocomplete.classList.contains("hidden")) {
+        return;
+      }
+
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        activeSuggestionIndex = Math.min(
+          activeSuggestions.length - 1,
+          activeSuggestionIndex + 1,
+        );
+        renderAutocomplete();
+        return;
+      }
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        activeSuggestionIndex = Math.max(0, activeSuggestionIndex - 1);
+        renderAutocomplete();
+        return;
+      }
+
+      if (event.key === "Enter" && activeSuggestionIndex >= 0) {
+        event.preventDefault();
+        applySuggestion(activeSuggestionIndex);
+        return;
+      }
+
+      if (event.key === "Escape") {
+        hideAutocomplete();
+      }
+    });
+
     saveButton.addEventListener("click", () => {
       const sql = sqlInput.value;
       vscode.postMessage({ type: "saveQuery", payload: { sql } });
@@ -845,6 +1183,13 @@ function getQueryPanelHtml(
 
       if (msg.type === "result") {
         renderResults(msg.payload);
+        return;
+      }
+
+      if (msg.type === "autocompleteSuggestions") {
+        activeSuggestions = Array.isArray(msg.payload) ? msg.payload : [];
+        activeSuggestionIndex = activeSuggestions.length > 0 ? 0 : -1;
+        renderAutocomplete();
       }
     });
 
@@ -862,6 +1207,16 @@ async function openQueryPanel(
   options: OpenQueryPanelOptions = {},
 ): Promise<void> {
   let currentQuery = options.initialQuery;
+  let autocompleteMetadata: SqlAutocompleteColumn[] | undefined;
+
+  const getAutocompleteMetadata = async (): Promise<SqlAutocompleteColumn[]> => {
+    if (!autocompleteMetadata) {
+      autocompleteMetadata = await service.listAutocompleteColumns();
+    }
+
+    return autocompleteMetadata;
+  };
+
   const panel = vscode.window.createWebviewPanel(
     "postgresPlugin.queryPanel",
     currentQuery
@@ -886,7 +1241,11 @@ async function openQueryPanel(
       typeof message === "object" && message !== null
         ? (message as {
             type?: string;
-            payload?: { sql?: unknown; id?: unknown };
+            payload?: {
+              sql?: unknown;
+              prefix?: unknown;
+              tableQualifier?: unknown;
+            };
           })
         : undefined;
 
@@ -928,6 +1287,36 @@ async function openQueryPanel(
           type: "status",
           ok: false,
           message: getErrorMessage(error),
+        });
+      }
+
+      return;
+    }
+
+    if (payload.type === "autocomplete") {
+      try {
+        const requestPayload: AutocompleteRequestPayload = {
+          prefix:
+            typeof payload.payload?.prefix === "string"
+              ? payload.payload.prefix
+              : "",
+          tableQualifier:
+            typeof payload.payload?.tableQualifier === "string"
+              ? payload.payload.tableQualifier
+              : undefined,
+        };
+
+        const metadata = await getAutocompleteMetadata();
+        const suggestions = buildAutocompleteSuggestions(metadata, requestPayload);
+
+        await panel.webview.postMessage({
+          type: "autocompleteSuggestions",
+          payload: suggestions,
+        });
+      } catch {
+        await panel.webview.postMessage({
+          type: "autocompleteSuggestions",
+          payload: [],
         });
       }
 

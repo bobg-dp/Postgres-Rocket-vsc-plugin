@@ -39,6 +39,12 @@ export interface EditableTableData {
   }>;
 }
 
+export interface SqlAutocompleteColumn {
+  schema: string;
+  table: string;
+  column: string;
+}
+
 function quoteIdentifier(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
@@ -196,6 +202,25 @@ export class PostgresService {
       name: String(row.name),
       dataType: String(row.data_type),
       isNullable: String(row.is_nullable).toUpperCase() === "YES",
+    }));
+  }
+
+  public async listAutocompleteColumns(): Promise<SqlAutocompleteColumn[]> {
+    const result = await this.execute(
+      `
+      SELECT table_schema AS schema,
+             table_name AS table,
+             column_name AS column
+      FROM information_schema.columns
+      WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY table_schema, table_name, ordinal_position
+      `,
+    );
+
+    return result.rows.map((row) => ({
+      schema: String(row.schema),
+      table: String(row.table),
+      column: String(row.column),
     }));
   }
 
