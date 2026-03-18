@@ -69,6 +69,17 @@ interface QueryExecutionResultPayload {
   rowCount: number;
   command: string;
   durationMs: number;
+  editable?: {
+    schema: string;
+    table: string;
+    ctidField: string;
+    columnTypes: Record<string, string>;
+  };
+}
+
+interface QueryResultChangeEntry {
+  ctid: string;
+  changes: Record<string, unknown>;
 }
 
 interface SqlAutocompleteSuggestion {
@@ -563,6 +574,7 @@ function getSavedQueryFromNode(
 function toQueryResultPayload(
   result: Awaited<ReturnType<PostgresService["execute"]>>,
   durationMs: number,
+  editable?: QueryExecutionResultPayload["editable"],
 ): QueryExecutionResultPayload {
   const columnsFromFields = result.fields.map((field) => field.name);
   const columns =
@@ -576,7 +588,69 @@ function toQueryResultPayload(
     rowCount: result.rowCount ?? 0,
     command: result.command,
     durationMs,
+    editable,
   };
+}
+
+interface EditableSelectTarget {
+  schema: string;
+  table: string;
+}
+
+function parseSimpleEditableSelectTarget(sql: string): EditableSelectTarget | undefined {
+  const normalized = sql.trim();
+  if (!/^select\b/i.test(normalized)) {
+    return undefined;
+  }
+
+  if (/\b(join|union|intersect|except|group\s+by|distinct)\b/i.test(normalized)) {
+    return undefined;
+  }
+
+  const fromMatch = normalized.match(
+    /\bfrom\s+((?:"[^"]+"|[a-zA-Z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[a-zA-Z_][\w$]*))?)/i,
+  );
+  if (!fromMatch?.[1]) {
+    return undefined;
+  }
+
+  const source = fromMatch[1].replace(/\s+/g, "");
+  if (source.includes(",")) {
+    return undefined;
+  }
+
+  const parts = source.split(".");
+  const unquote = (value: string) =>
+    value.startsWith('"') && value.endsWith('"')
+      ? value.slice(1, -1).replace(/""/g, '"')
+      : value;
+
+  if (parts.length === 1) {
+    return {
+      schema: "public",
+      table: unquote(parts[0]),
+    };
+  }
+
+  if (parts.length === 2) {
+    return {
+      schema: unquote(parts[0]),
+      table: unquote(parts[1]),
+    };
+  }
+
+  return undefined;
+}
+
+function ensureEditableCtidProjection(sql: string): string {
+  if (/\b(__ctid__|ctid)\b/i.test(sql)) {
+    return sql;
+  }
+
+  return sql.replace(
+    /^(\s*select\s+)/i,
+    "$1ctid::text AS __ctid__, ",
+  );
 }
 
 function normalizeIdentifier(value: string): string {
@@ -860,6 +934,9 @@ function getQueryPanelHtml(
       max-height: 46vh;
       overflow: auto;
     }
+    .results-save.hidden {
+      display: none;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -887,6 +964,71 @@ function getQueryPanelHtml(
       font-size: 12px;
       opacity: 0.85;
     }
+    .editable-cell-input {
+      width: 100%;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--vscode-input-foreground);
+      padding: 6px 8px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 12px;
+      cursor: pointer;
+      box-sizing: border-box;
+    }
+    .editable-cell-input.changed {
+      background: #1f4f2d55;
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: #00000066;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+    }
+    .modal.visible {
+      display: flex;
+    }
+    .modal-body {
+      width: min(760px, 92vw);
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      border-radius: 10px;
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+    .modal-title {
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .modal-input,
+    .modal-textarea {
+      width: 100%;
+      border: 1px solid var(--vscode-input-border);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 6px;
+      padding: 8px;
+      box-sizing: border-box;
+      font-family: var(--vscode-editor-font-family, monospace);
+    }
+    .modal-textarea {
+      min-height: 220px;
+      resize: vertical;
+    }
+    .modal-error {
+      min-height: 16px;
+      font-size: 12px;
+      color: var(--vscode-testing-iconFailed);
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
   </style>
 </head>
 <body>
@@ -906,12 +1048,26 @@ function getQueryPanelHtml(
     <div class="actions">
       <button id="proceedButton" type="button"><span aria-hidden="true">&#9654;</span><span>Proceed</span></button>
       <button id="saveButton" type="button" class="secondary"><span aria-hidden="true">&#128190;</span><span>Save</span></button>
+      <button id="saveResultChangesButton" type="button" class="results-save hidden"><span aria-hidden="true">&#10003;</span><span>Save Result Changes</span></button>
     </div>
   </div>
 
   <div class="results">
     <div id="resultsHeader" class="results-header"></div>
     <div id="resultsBody" class="results-body"></div>
+  </div>
+
+  <div id="cellModal" class="modal" role="dialog" aria-modal="true">
+    <div class="modal-body">
+      <div id="cellModalTitle" class="modal-title"></div>
+      <input id="cellModalInput" class="modal-input" />
+      <textarea id="cellModalTextarea" class="modal-textarea"></textarea>
+      <div id="cellModalError" class="modal-error"></div>
+      <div class="modal-actions">
+        <button id="cellModalCancel" type="button" class="secondary">Cancel</button>
+        <button id="cellModalSave" type="button">Apply</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -926,11 +1082,22 @@ function getQueryPanelHtml(
     const autocompleteList = document.getElementById("autocompleteList");
     const proceedButton = document.getElementById("proceedButton");
     const saveButton = document.getElementById("saveButton");
+    const saveResultChangesButton = document.getElementById("saveResultChangesButton");
     const resultsHeader = document.getElementById("resultsHeader");
     const resultsBody = document.getElementById("resultsBody");
+    const cellModal = document.getElementById("cellModal");
+    const cellModalTitle = document.getElementById("cellModalTitle");
+    const cellModalInput = document.getElementById("cellModalInput");
+    const cellModalTextarea = document.getElementById("cellModalTextarea");
+    const cellModalError = document.getElementById("cellModalError");
+    const cellModalCancel = document.getElementById("cellModalCancel");
+    const cellModalSave = document.getElementById("cellModalSave");
 
     let activeSuggestions = [];
     let activeSuggestionIndex = -1;
+    let latestResultPayload = null;
+    let resultChangesByRow = new Map();
+    let currentModalContext = null;
     let lastAutocompleteContext = {
       replaceStart: 0,
       replaceEnd: 0,
@@ -1068,10 +1235,170 @@ function getQueryPanelHtml(
       return String(value);
     }
 
+    function isJsonType(column, payload) {
+      const columnTypes = (payload && payload.editable && payload.editable.columnTypes) || {};
+      const type = String(columnTypes[column] || "").toLowerCase();
+      return type === "json" || type === "jsonb";
+    }
+
+    function serializeInputValue(value) {
+      if (value === null || value === undefined) {
+        return "";
+      }
+
+      if (typeof value === "object") {
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }
+
+      return String(value);
+    }
+
+    function openCellModal(rowIndex, column, input, payload) {
+      currentModalContext = { rowIndex, column, input, payload };
+      cellModalError.textContent = "";
+      const isJson = isJsonType(column, payload);
+
+      cellModalTitle.textContent = isJson
+        ? "Edit JSON: " + column
+        : "Edit value: " + column;
+
+      if (isJson) {
+        cellModalInput.style.display = "none";
+        cellModalTextarea.style.display = "block";
+
+        try {
+          const parsed = input.value.trim() ? JSON.parse(input.value) : null;
+          cellModalTextarea.value = parsed === null ? "" : JSON.stringify(parsed, null, 2);
+        } catch {
+          cellModalTextarea.value = input.value;
+        }
+        cellModalTextarea.focus();
+      } else {
+        cellModalTextarea.style.display = "none";
+        cellModalInput.style.display = "block";
+        cellModalInput.value = input.value;
+        cellModalInput.focus();
+        cellModalInput.select();
+      }
+
+      cellModal.classList.add("visible");
+    }
+
+    function closeCellModal() {
+      currentModalContext = null;
+      cellModal.classList.remove("visible");
+    }
+
+    function markResultChanged(rowIndex, column, input) {
+      const isChanged = input.value !== input.dataset.original;
+      input.classList.toggle("changed", isChanged);
+
+      const existing = resultChangesByRow.get(rowIndex) || {};
+      if (isChanged) {
+        existing[column] = input.value;
+        resultChangesByRow.set(rowIndex, existing);
+      } else {
+        delete existing[column];
+        if (Object.keys(existing).length === 0) {
+          resultChangesByRow.delete(rowIndex);
+        } else {
+          resultChangesByRow.set(rowIndex, existing);
+        }
+      }
+
+      saveResultChangesButton.disabled = resultChangesByRow.size === 0;
+    }
+
+    function convertResultChange(rawValue, column, payload) {
+      const editable = payload && payload.editable;
+      const columnTypes = (editable && editable.columnTypes) || {};
+      const type = String(columnTypes[column] || "").toLowerCase();
+      const trimmed = String(rawValue).trim();
+
+      if (trimmed === "") {
+        return null;
+      }
+
+      if (type === "boolean") {
+        const normalized = trimmed.toLowerCase();
+        if (normalized === "true" || normalized === "1") {
+          return true;
+        }
+        if (normalized === "false" || normalized === "0") {
+          return false;
+        }
+        throw new Error("Column " + column + ": expected boolean (true/false).");
+      }
+
+      const numericTypes = new Set([
+        "smallint", "integer", "bigint", "decimal", "numeric", "real", "double precision",
+        "smallserial", "serial", "bigserial"
+      ]);
+      if (numericTypes.has(type)) {
+        const numeric = Number(trimmed);
+        if (Number.isNaN(numeric)) {
+          throw new Error("Column " + column + ": expected number.");
+        }
+        return numeric;
+      }
+
+      if (type === "json" || type === "jsonb") {
+        try {
+          return JSON.parse(rawValue);
+        } catch {
+          throw new Error("Column " + column + ": invalid JSON.");
+        }
+      }
+
+      return rawValue;
+    }
+
+    function buildResultChangesPayload() {
+      if (!latestResultPayload || !latestResultPayload.editable) {
+        return [];
+      }
+
+      const ctidField = latestResultPayload.editable.ctidField;
+      const changes = [];
+
+      for (const [rowIndex, rowChanges] of resultChangesByRow.entries()) {
+        const row = latestResultPayload.rows[rowIndex];
+        if (!row) {
+          continue;
+        }
+
+        const ctid = row[ctidField];
+        if (ctid === undefined || ctid === null) {
+          continue;
+        }
+
+        const converted = {};
+        for (const [column, rawValue] of Object.entries(rowChanges)) {
+          converted[column] = convertResultChange(rawValue, column, latestResultPayload);
+        }
+
+        changes.push({
+          ctid: String(ctid),
+          changes: converted,
+        });
+      }
+
+      return changes;
+    }
+
     function renderResults(payload) {
+      latestResultPayload = payload || null;
+      resultChangesByRow.clear();
+      saveResultChangesButton.disabled = true;
+
       if (!payload) {
         resultsHeader.textContent = "Run query to see results.";
         resultsBody.innerHTML = '<div class="empty">No results yet.</div>';
+        saveResultChangesButton.classList.add("hidden");
         return;
       }
 
@@ -1083,6 +1410,11 @@ function getQueryPanelHtml(
 
       const columns = Array.isArray(payload.columns) ? payload.columns : [];
       const rows = Array.isArray(payload.rows) ? payload.rows : [];
+      const editable = payload.editable || null;
+      const editableColumns = editable
+        ? columns.filter((column) => column !== editable.ctidField)
+        : columns;
+      saveResultChangesButton.classList.toggle("hidden", !editable);
 
       if (!columns.length) {
         resultsBody.innerHTML = '<div class="empty">Query executed. No tabular data returned.</div>';
@@ -1093,7 +1425,7 @@ function getQueryPanelHtml(
       const thead = document.createElement("thead");
       const headRow = document.createElement("tr");
 
-      for (const column of columns) {
+      for (const column of editableColumns) {
         const th = document.createElement("th");
         th.textContent = String(column);
         headRow.appendChild(th);
@@ -1102,15 +1434,28 @@ function getQueryPanelHtml(
       table.appendChild(thead);
 
       const tbody = document.createElement("tbody");
-      for (const row of rows) {
+      rows.forEach((row, rowIndex) => {
         const tr = document.createElement("tr");
-        for (const column of columns) {
+        for (const column of editableColumns) {
           const td = document.createElement("td");
-          td.textContent = toCellValue(row[column]);
+          if (editable) {
+            const input = document.createElement("input");
+            const originalValue = serializeInputValue(row[column]);
+            input.className = "editable-cell-input";
+            input.value = originalValue;
+            input.dataset.original = originalValue;
+            input.readOnly = true;
+            input.addEventListener("click", () => {
+              openCellModal(rowIndex, column, input, payload);
+            });
+            td.appendChild(input);
+          } else {
+            td.textContent = toCellValue(row[column]);
+          }
           tr.appendChild(td);
         }
         tbody.appendChild(tr);
-      }
+      });
 
       table.appendChild(tbody);
       resultsBody.innerHTML = "";
@@ -1120,6 +1465,32 @@ function getQueryPanelHtml(
     proceedButton.addEventListener("click", () => {
       const sql = sqlInput.value;
       vscode.postMessage({ type: "execute", payload: { sql } });
+    });
+
+    saveResultChangesButton.addEventListener("click", () => {
+      let changes;
+      try {
+        changes = buildResultChangesPayload();
+      } catch (error) {
+        setStatus(String(error instanceof Error ? error.message : error), false);
+        return;
+      }
+
+      if (!changes.length || !latestResultPayload || !latestResultPayload.editable) {
+        setStatus("No editable result changes to save.", false);
+        return;
+      }
+
+      saveResultChangesButton.disabled = true;
+      setStatus("Saving result changes...", true);
+      vscode.postMessage({
+        type: "saveResultChanges",
+        payload: {
+          schema: latestResultPayload.editable.schema,
+          table: latestResultPayload.editable.table,
+          changes,
+        },
+      });
     });
 
     sqlInput.addEventListener("input", () => {
@@ -1170,6 +1541,35 @@ function getQueryPanelHtml(
       vscode.postMessage({ type: "saveQuery", payload: { sql } });
     });
 
+    cellModalCancel.addEventListener("click", () => {
+      closeCellModal();
+    });
+
+    cellModalSave.addEventListener("click", () => {
+      if (!currentModalContext) {
+        return;
+      }
+
+      const { rowIndex, column, input, payload } = currentModalContext;
+      const jsonMode = isJsonType(column, payload);
+      const nextValue = jsonMode ? cellModalTextarea.value : cellModalInput.value;
+
+      if (jsonMode && nextValue.trim() !== "") {
+        try {
+          const parsed = JSON.parse(nextValue);
+          input.value = JSON.stringify(parsed);
+        } catch {
+          cellModalError.textContent = "Invalid JSON format.";
+          return;
+        }
+      } else {
+        input.value = nextValue;
+      }
+
+      markResultChanged(rowIndex, column, input);
+      closeCellModal();
+    });
+
     window.addEventListener("message", (event) => {
       const msg = event.data;
       if (!msg || !msg.type) {
@@ -1178,6 +1578,9 @@ function getQueryPanelHtml(
 
       if (msg.type === "status") {
         setStatus(String(msg.message || ""), Boolean(msg.ok));
+        if (saveResultChangesButton) {
+          saveResultChangesButton.disabled = false;
+        }
         return;
       }
 
@@ -1230,6 +1633,45 @@ async function openQueryPanel(
   );
 
   const readQueries = () => getSavedSqlQueries(context, connection.id);
+  let lastExecutedSql: string | undefined;
+
+  const executeAndPostResult = async (sql: string): Promise<void> => {
+    const editableTarget = parseSimpleEditableSelectTarget(sql);
+    const startedAt = Date.now();
+    const result = await service.execute(sql);
+    const durationMs = Date.now() - startedAt;
+    let editable: QueryExecutionResultPayload["editable"] | undefined;
+
+    if (editableTarget && result.rows.length > 0) {
+      const ctidField = result.fields.some((field) => field.name === "__ctid__")
+        ? "__ctid__"
+        : undefined;
+
+      if (ctidField) {
+        const columns = await service.listColumns(
+          editableTarget.schema,
+          editableTarget.table,
+        );
+        const columnTypes: Record<string, string> = {};
+        for (const column of columns) {
+          columnTypes[column.name] = column.dataType.toLowerCase();
+        }
+
+        editable = {
+          schema: editableTarget.schema,
+          table: editableTarget.table,
+          ctidField,
+          columnTypes,
+        };
+      }
+    }
+
+    await panel.webview.postMessage({
+      type: "result",
+      payload: toQueryResultPayload(result, durationMs, editable),
+    });
+  };
+
   panel.webview.html = getQueryPanelHtml(
     connection.name,
     currentQuery?.sql ?? "",
@@ -1245,6 +1687,9 @@ async function openQueryPanel(
               sql?: unknown;
               prefix?: unknown;
               tableQualifier?: unknown;
+              schema?: unknown;
+              table?: unknown;
+              changes?: unknown;
             };
           })
         : undefined;
@@ -1254,10 +1699,13 @@ async function openQueryPanel(
     }
 
     if (payload.type === "execute") {
-      const sql =
+      const rawSql =
         payload.payload && typeof payload.payload.sql === "string"
           ? payload.payload.sql
           : "";
+
+      const editableTarget = parseSimpleEditableSelectTarget(rawSql);
+      const sql = editableTarget ? ensureEditableCtidProjection(rawSql) : rawSql;
 
       if (!sql.trim()) {
         await panel.webview.postMessage({
@@ -1269,14 +1717,8 @@ async function openQueryPanel(
       }
 
       try {
-        const startedAt = Date.now();
-        const result = await service.execute(sql);
-        const durationMs = Date.now() - startedAt;
-
-        await panel.webview.postMessage({
-          type: "result",
-          payload: toQueryResultPayload(result, durationMs),
-        });
+        lastExecutedSql = sql;
+        await executeAndPostResult(sql);
         await panel.webview.postMessage({
           type: "status",
           ok: true,
@@ -1287,6 +1729,66 @@ async function openQueryPanel(
           type: "status",
           ok: false,
           message: getErrorMessage(error),
+        });
+      }
+
+      return;
+    }
+
+    if (payload.type === "saveResultChanges") {
+      const schema =
+        typeof payload.payload?.schema === "string" ? payload.payload.schema : "";
+      const table =
+        typeof payload.payload?.table === "string" ? payload.payload.table : "";
+      const changes = Array.isArray(payload.payload?.changes)
+        ? (payload.payload?.changes as QueryResultChangeEntry[])
+        : [];
+
+      if (!schema || !table || changes.length === 0) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: "No result changes to save.",
+        });
+        return;
+      }
+
+      if (service.isTransactionActive()) {
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message:
+            "Wykryto już aktywną transakcję. Zakończ ją przed zapisem zmian z wyników.",
+        });
+        return;
+      }
+
+      try {
+        await service.beginTransaction();
+        for (const entry of changes) {
+          await service.updateRowByCtid(schema, table, entry.ctid, entry.changes);
+        }
+
+        await service.commitTransaction();
+
+        if (lastExecutedSql) {
+          await executeAndPostResult(lastExecutedSql);
+        }
+
+        await panel.webview.postMessage({
+          type: "status",
+          ok: true,
+          message: `Saved ${changes.length} changed rows (COMMIT).`,
+        });
+      } catch (error) {
+        if (service.isTransactionActive()) {
+          await service.rollbackTransaction();
+        }
+
+        await panel.webview.postMessage({
+          type: "status",
+          ok: false,
+          message: `${getErrorMessage(error)} (ROLLBACK)`,
         });
       }
 
