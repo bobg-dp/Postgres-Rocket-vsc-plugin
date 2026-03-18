@@ -930,6 +930,27 @@ function getQueryPanelHtml(
       gap: 8px;
       flex-wrap: wrap;
     }
+    .results-search {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--vscode-editorWidget-border);
+      background: var(--vscode-editor-background);
+    }
+    .results-search input {
+      flex: 1;
+      min-width: 180px;
+      border: 1px solid var(--vscode-input-border);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 6px;
+      padding: 7px 10px;
+      outline: none;
+    }
+    .results-search input:focus {
+      border-color: var(--vscode-focusBorder);
+    }
     .results-body {
       max-height: 46vh;
       overflow: auto;
@@ -1054,6 +1075,10 @@ function getQueryPanelHtml(
 
   <div class="results">
     <div id="resultsHeader" class="results-header"></div>
+    <div class="results-search">
+      <input id="resultsSearchInput" type="text" placeholder="Filter result rows..." />
+      <button id="resultsSearchClearButton" type="button" class="secondary">Clear</button>
+    </div>
     <div id="resultsBody" class="results-body"></div>
   </div>
 
@@ -1084,6 +1109,8 @@ function getQueryPanelHtml(
     const saveButton = document.getElementById("saveButton");
     const saveResultChangesButton = document.getElementById("saveResultChangesButton");
     const resultsHeader = document.getElementById("resultsHeader");
+    const resultsSearchInput = document.getElementById("resultsSearchInput");
+    const resultsSearchClearButton = document.getElementById("resultsSearchClearButton");
     const resultsBody = document.getElementById("resultsBody");
     const cellModal = document.getElementById("cellModal");
     const cellModalTitle = document.getElementById("cellModalTitle");
@@ -1096,6 +1123,7 @@ function getQueryPanelHtml(
     let activeSuggestions = [];
     let activeSuggestionIndex = -1;
     let latestResultPayload = null;
+    let resultSearchQuery = "";
     let resultChangesByRow = new Map();
     let currentModalContext = null;
     let lastAutocompleteContext = {
@@ -1390,10 +1418,25 @@ function getQueryPanelHtml(
       return changes;
     }
 
-    function renderResults(payload) {
-      latestResultPayload = payload || null;
-      resultChangesByRow.clear();
-      saveResultChangesButton.disabled = true;
+    function shouldRowMatchFilter(row, columns, query) {
+      if (!query) {
+        return true;
+      }
+
+      const normalized = query.toLowerCase();
+      return columns.some((column) =>
+        toCellValue(row[column]).toLowerCase().includes(normalized),
+      );
+    }
+
+    function renderResults(nextPayload) {
+      if (nextPayload !== undefined) {
+        latestResultPayload = nextPayload || null;
+        resultChangesByRow.clear();
+        saveResultChangesButton.disabled = true;
+      }
+
+      const payload = latestResultPayload;
 
       if (!payload) {
         resultsHeader.textContent = "Run query to see results.";
@@ -1414,11 +1457,23 @@ function getQueryPanelHtml(
       const editableColumns = editable
         ? columns.filter((column) => column !== editable.ctidField)
         : columns;
+      const filteredRowEntries = rows
+        .map((row, rowIndex) => ({ row, rowIndex }))
+        .filter(({ row }) =>
+          shouldRowMatchFilter(row, editableColumns, resultSearchQuery),
+        );
       saveResultChangesButton.classList.toggle("hidden", !editable);
 
       if (!columns.length) {
         resultsBody.innerHTML = '<div class="empty">Query executed. No tabular data returned.</div>';
         return;
+      }
+
+      if (resultSearchQuery) {
+        resultsHeader.textContent =
+          command +
+          " | rows: " + filteredRowEntries.length + "/" + rows.length +
+          " | time: " + duration + " ms";
       }
 
       const table = document.createElement("table");
@@ -1433,18 +1488,32 @@ function getQueryPanelHtml(
       thead.appendChild(headRow);
       table.appendChild(thead);
 
+      if (filteredRowEntries.length === 0) {
+        resultsBody.innerHTML = '<div class="empty">No rows match current filter.</div>';
+        return;
+      }
+
       const tbody = document.createElement("tbody");
-      rows.forEach((row, rowIndex) => {
+      filteredRowEntries.forEach(({ row, rowIndex }) => {
         const tr = document.createElement("tr");
         for (const column of editableColumns) {
           const td = document.createElement("td");
           if (editable) {
             const input = document.createElement("input");
             const originalValue = serializeInputValue(row[column]);
+            const pendingRowChanges = resultChangesByRow.get(rowIndex) || {};
+            const hasPendingValue = Object.prototype.hasOwnProperty.call(
+              pendingRowChanges,
+              column,
+            );
+            const currentValue = hasPendingValue
+              ? String(pendingRowChanges[column] ?? "")
+              : originalValue;
             input.className = "editable-cell-input";
-            input.value = originalValue;
+            input.value = currentValue;
             input.dataset.original = originalValue;
             input.readOnly = true;
+            input.classList.toggle("changed", currentValue !== originalValue);
             input.addEventListener("click", () => {
               openCellModal(rowIndex, column, input, payload);
             });
@@ -1465,6 +1534,22 @@ function getQueryPanelHtml(
     proceedButton.addEventListener("click", () => {
       const sql = sqlInput.value;
       vscode.postMessage({ type: "execute", payload: { sql } });
+    });
+
+    resultsSearchInput.addEventListener("input", () => {
+      resultSearchQuery = String(resultsSearchInput.value || "").trim();
+      renderResults();
+    });
+
+    resultsSearchClearButton.addEventListener("click", () => {
+      if (!resultsSearchInput.value) {
+        return;
+      }
+
+      resultsSearchInput.value = "";
+      resultSearchQuery = "";
+      renderResults();
+      resultsSearchInput.focus();
     });
 
     saveResultChangesButton.addEventListener("click", () => {

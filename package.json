@@ -2,7 +2,7 @@
   "name": "postgresql-rocket-plugin",
   "displayName": "PostgreSQL Rocket",
   "description": "Browsing and editing PostgreSQL data visually with transaction support.",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "driftingpixel",
   "icon": "./media/icon.png",
   "repository": "git@github.com:bobg-dp/DeePee-Postgres-plugin.git",

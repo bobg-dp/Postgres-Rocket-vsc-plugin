@@ -18,9 +18,11 @@ https://buycoffee.to/driftingpixel
 - Edit and delete connections from the context menu
 - Schema -> table -> column explorer
 - SQL query panel opened from icon next to connection name
+- SQL autocomplete in query editor (table and column suggestions)
 - Query execution with `Proceed` and tabular results below the editor
 - Saved SQL queries per connection in tree (`Saved Queries` folder)
 - Rename/delete saved queries from tree item actions
+- Editable query results (popup cell editor + transactional save)
 - Editable table view for table rows
 - JSON-aware cell rendering and JSON validation in popup editor
 - Transactional row updates (`COMMIT` on success, `ROLLBACK` on error)
@@ -50,9 +52,12 @@ https://buycoffee.to/driftingpixel
 
 1. In `Connections`, click the query icon next to a saved connection.
 2. Type SQL in the editor.
-3. Click `Proceed` to execute.
-4. Results are rendered directly under the query panel.
-5. Click `Save` to store or update a query for the current connection.
+3. Use autocomplete while typing.
+4. Suggestions for tables and columns appear while typing.
+5. Press `Ctrl+Space` (or `Cmd+Space`, depending on system shortcut settings) to force suggestions.
+6. Click `Proceed` to execute.
+7. Results are rendered directly under the query panel.
+8. Click `Save` to store or update a query for the current connection.
 
 ## Saved Queries In Tree
 
@@ -60,6 +65,27 @@ https://buycoffee.to/driftingpixel
 2. Open `Saved Queries` (first folder in that connection).
 3. Click a saved query to open it in the SQL panel.
 4. Use inline actions to rename or delete the saved query.
+5. Saving from the SQL panel updates the currently opened saved query.
+
+## Editing Query Results
+
+1. Run a simple single-table `SELECT` query in SQL panel.
+2. Click a result cell to open popup editor.
+3. Modify values (JSON is validated).
+4. Click `Save Result Changes`.
+5. Changes are saved in one transaction.
+6. On success extension performs `COMMIT`.
+7. On error extension performs `ROLLBACK`.
+
+## Limitations
+
+1. Query-result editing is enabled only for simple single-table `SELECT` queries.
+2. Complex queries are treated as read-only results, for example:
+3. Queries with `JOIN`.
+4. Queries with `UNION`, `INTERSECT`, or `EXCEPT`.
+5. Queries with `GROUP BY` or `DISTINCT`.
+6. To support transactional updates for query results, extension injects an internal `ctid` field into editable query execution.
+7. If a system shortcut blocks `Ctrl+Space` or `Cmd+Space`, autocomplete still works while typing, but manual trigger may require changing OS/editor shortcut settings.
 
 ## Popup Cell Editor
 
